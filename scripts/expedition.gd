@@ -18,6 +18,9 @@ const CREAM := Color(0.68, 0.6, 0.44)
 const TAN := Color(0.59, 0.46, 0.33)
 
 var keys_label: Label
+var art_hint := ""
+const VIGNETTE = preload("res://scripts/vignette.gd")
+const UI_FX = preload("res://scripts/ui_fx.gd")
 var PAL := {
 	"south": {"grass": Color8(84, 92, 44), "grass_hi": Color8(150, 140, 62), "dirt": Color8(104, 80, 60), "leaf": Color8(52, 66, 36), "leaf_hi": Color8(140, 120, 56), "trunk": Color8(62, 44, 36)},
 	"west": {"grass": Color8(56, 104, 50), "grass_hi": Color8(130, 176, 80), "dirt": Color8(92, 82, 52), "leaf": Color8(30, 76, 44), "leaf_hi": Color8(96, 150, 74), "trunk": Color8(52, 42, 30)},
@@ -600,7 +603,6 @@ func _on_ledger(text: String) -> void:
 		return
 	ledger_note.text = Game.L("written in the ledger:  ") + text
 	ledger_note.modulate.a = 0.0
-	Game.sfx("click", -10.0, 0.55)
 	var tw := create_tween()
 	tw.tween_property(ledger_note, "modulate:a", 1.0, 0.25)
 	tw.tween_interval(4.0)
@@ -851,6 +853,7 @@ func _interact(p: Dictionary) -> void:
 # ------------------------------------------------------------------ window kit
 func close_menu() -> void:
 	if menu_root != null:
+		Game.sfx("ui_close", -6.0)
 		menu_root.queue_free()
 		menu_root = null
 	busy = false
@@ -885,13 +888,75 @@ func window(title: String, width := 300, closable := true) -> VBoxContainer:
 	panel.add_child(vb)
 	var head := HBoxContainer.new()
 	vb.add_child(head)
-	var tl := Game.label(title, GOLDC)
-	tl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	head.add_child(tl)
+	var plate := PanelContainer.new()
+	plate.theme_type_variation = "TitlePlate"
+	plate.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	plate.add_child(Game.label(title, Color(1.0, 0.9, 0.62)))
+	head.add_child(plate)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(spacer)
 	if closable:
 		head.add_child(Game.button("x", close_menu))
+	# a small animated painting heads the window
+	var art := art_hint
+	art_hint = ""
+	if art == "":
+		art = _art_for(title)
+	var vig = null
+	if art != "":
+		vig = VIGNETTE.new()
+		vig.setup(art)
+		vb.add_child(vig)
 	vb.add_child(HSeparator.new())
+	if fresh:
+		Game.sfx("ui_open", -5.0)
+		panel.pivot_offset = Vector2(width * 0.5, 60)
+		panel.scale = Vector2(0.94, 0.94)
+		create_tween().tween_property(panel, "scale", Vector2.ONE, 0.18).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_settle_window.call_deferred(panel, vig, fresh)
 	return vb
+
+
+func _art_for(title: String) -> String:
+	var table := {"Camp": "camp", "Muster": "muster", "The baggage train": "pack", "The ledger": "ledger",
+		"The four realms": "map", "A roadside stall": "stall", "A river altar": "altar", "The road is held": "brief",
+		"The road divides": "cross", "The omen": "omen", "The toll": "brief"}
+	for k in table:
+		if title == Game.L(k):
+			return table[k]
+	return ""
+
+
+func _settle_window(panel: Control, vig, fresh: bool) -> void:
+	## after layout: shrink the painting if the window would run off screen, then run the gold sparks round the frame
+	if not is_instance_valid(panel):
+		return
+	await get_tree().process_frame
+	if not is_instance_valid(panel):
+		return
+	var over := panel.get_combined_minimum_size().y - 262.0
+	if is_instance_valid(vig) and over > 0.0:
+		var hgt: float = max(0.0, vig.custom_minimum_size.y - over)
+		if hgt < 22.0:
+			vig.queue_free()
+		else:
+			vig.custom_minimum_size.y = hgt
+		await get_tree().process_frame
+	if fresh and is_instance_valid(panel):
+		var fx = UI_FX.new()
+		fx.mode = "border"
+		fx.rect = Rect2(panel.global_position + Vector2(2, 2), panel.size - Vector2(4, 4))
+		menu_layer.add_child(fx)
+
+
+func stamp(at: Vector2) -> void:
+	## a wax seal pressed where a decision was made
+	var fx = UI_FX.new()
+	fx.mode = "seal"
+	fx.at = at
+	fx_layer.add_child(fx)
+	Game.sfx("ui_choice", -3.0)
 
 
 func _scroll(vb: VBoxContainer, height: int) -> VBoxContainer:
@@ -998,7 +1063,8 @@ func open_shop(p: Dictionary) -> void:
 	var buy_grain := func():
 		Game.denarii -= 12
 		Game.grain += 10
-		Game.sfx("coin")
+		Game.sfx("coin_pay", -6.0)
+		Game.sfx("grain", -4.0)
 		Game.changed.emit()
 		open_shop(p)
 	var bg := Game.button(Game.L("10 grain  -  12 d"), buy_grain, Game.denarii >= 12)
@@ -1030,7 +1096,7 @@ func open_shop(p: Dictionary) -> void:
 		var sell := func():
 			Game.remove_item(id)
 			Game.denarii += val
-			Game.sfx("coin")
+			Game.sfx("sell", -3.0)
 			if id == "white_ox":
 				Game.write(Game.L("Sold the white ox for %d denarii.") % val)
 			elif id == "relic_horn":
@@ -1308,6 +1374,7 @@ func open_battle_brief() -> void:
 
 # ------------------------------------------------------------------ events
 func _finish_event(p: Dictionary, title: String, text: String) -> void:
+	art_hint = _event_art(p)
 	p["used"] = true
 	Game.flags["event_" + str(p["event"])] = true
 	Game.changed.emit()
@@ -1321,12 +1388,18 @@ func _skip_event(p: Dictionary, title: String) -> void:
 	close_menu()
 
 
+func _event_art(p: Dictionary) -> String:
+	return {"south": "village", "west": "seed", "north": "oath", "east": "envoy", "deserters": "deserters"}.get(str(p.get("event", "")), "refugees")
+
+
 func _show_event(p: Dictionary, title: String, text: String, choices: Array) -> void:
+	art_hint = _event_art(p)
 	var vb := window(title, 372, false)
 	vb.add_child(Game.label(text, null, 358))
 	vb.add_child(HSeparator.new())
 	for c in choices:
 		var b := Game.button(str(c[0]), c[2], c[1])
+		b.pressed.connect(func(): stamp(b.get_global_rect().get_center() if is_instance_valid(b) else Vector2(240, 135)))
 		b.set("autowrap_mode", TextServer.AUTOWRAP_WORD_SMART)   # Godot 4.3+; ignored on older 4.x
 		b.custom_minimum_size = Vector2(358, 0)
 		vb.add_child(b)
