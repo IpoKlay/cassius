@@ -77,6 +77,9 @@ func _ready() -> void:
 	for k in ["tree_bg", "corps_bronze", "corps_gold", "art_bronze", "art_gold", "spec_bronze", "spec_gold", "order_bronze", "order_gold",
 			"lore_bronze", "lore_gold", "coin_head", "coin_eagle", "laurel", "eagle", "wax_panel"]:
 		TX[k] = Game.load_tex("res://assets/tree/%s.png" % k)
+	# the aureus: the Emperor's head, the red standard on the back, 12-frame flip sheets (frame 0 = head up)
+	for k in ["aureus_spin_32_sheet", "aureus_spin_16_sheet"]:
+		TX[k] = Game.load_tex("res://assets/ui/aureus/%s.png" % k)
 	for id in Game.TREE:
 		TX["i_" + str(id)] = Game.load_tex("res://assets/tree/icons/%s.png" % id)
 	if TX["wax_panel"] != null:
@@ -255,14 +258,18 @@ func _try_buy(id: String) -> void:
 	Game.upgrades[id] = lv
 	Game.write(Game.L("Paid %d denarii: %s%s.") % [cost, Game.L(str(d["name"])), (Game.L(", level %d") % lv) if int(d["max"]) > 1 else ""])
 	Game.changed.emit()
-	Game.sfx("coin_pay", -3.0, 1.0 + 0.03 * lv)       # every purchase: the purse empties
-	Game.sfx("coin", -8.0, 1.0 + 0.05 * lv)
+	Game.sfx("coin_spend", -7.0, 1.0 + 0.03 * lv)     # every purchase: the purse empties
+	Game.sfx("coin_flip", -2.0)                        # pop, two turns in the air, the tink as it lands
 	anim[id]["punch"] = -0.35
 	purse_pop = 1.0
-	var n := 5 + lv * 2 + (6 if _ring(id) >= 2 else 0)
+	# one aureus pops off the boss (0.1 s), flips twice along an arc (0.4 s) and lands head up on the node,
+	# in time with coin_flip.wav (its landing tink is at 0.5 s); the node's own voice plays on impact
+	coins.append({"a": CENTER + Vector2(0, -12), "b": pos[id], "k": -0.25, "dur": 0.4,
+		"h": 30.0, "side": 0.0, "id": id, "hero": true})
+	var n := 2 + lv + (3 if _ring(id) >= 2 else 0)     # a few small coins trail after it
 	for i in n:
-		coins.append({"a": CENTER + Vector2(0, -2), "b": pos[id], "k": -0.035 * i, "dur": 0.28,
-			"h": randf_range(16, 40), "side": randf_range(-24, 24), "id": id if i == n - 1 else ""})
+		coins.append({"a": CENTER + Vector2(0, -2), "b": pos[id], "k": -0.25 - 0.05 * (i + 1), "dur": 0.4,
+			"h": randf_range(16, 34), "side": randf_range(-18, 18), "id": ""})
 
 
 func _impact(id: String) -> void:
@@ -417,7 +424,8 @@ func _process(delta: float) -> void:
 		if q["k"] >= 1.0:
 			coins.remove_at(i)
 			_emit(q["b"], 3, GOLD, 34.0, "spark")
-			Game.sfx("coin", -17.0, randf_range(1.3, 1.8))
+			if not q.get("hero", false):                # the hero's landing is already in coin_flip.wav
+				Game.sfx("coin", -17.0, randf_range(1.3, 1.8))
 			if q["id"] != "":
 				_impact(q["id"])
 	for i in range(floats.size() - 1, -1, -1):
@@ -462,6 +470,27 @@ func _ambient(id: String, delta: float) -> void:
 	if lv <= 0:
 		return
 	fx.ambient(str(THEME.get(id, "")), id, pos[id], NR[_ring(id)], lv, int(Game.TREE[id]["max"]), delta)
+
+
+func _draw_hero_coin(q: Dictionary) -> void:
+	## the aureus in flight, from the 16 px flip sheet: one frame per 1/60 s, frame 0 = head up
+	var k: float = q["k"]
+	var p: Vector2
+	var frame := 0
+	if k < 0.0:                                         # the pop off the boss
+		var u: float = clamp((k + 0.25) / 0.25, 0.0, 1.0)
+		u = 1.0 - pow(1.0 - u, 3.0)
+		p = (CENTER - Vector2(0, 2)).lerp(q["a"], u)
+	else:
+		var k2: float = clamp(k, 0.0, 1.0)
+		p = q["a"].lerp(q["b"], k2) + Vector2(0, -sin(PI * k2) * float(q["h"]))
+		frame = int(k2 * float(q["dur"]) * 60.0) % 12
+	var sheet: Texture2D = TX.get("aureus_spin_16_sheet")
+	var r := Rect2((p - Vector2(8, 8)).round(), Vector2(16, 16))
+	if sheet == null:
+		draw_texture_rect(Game.tex_coin, r, false)
+	else:
+		draw_texture_rect_region(sheet, r, Rect2(frame * 16, 0, 16, 16))
 
 
 func _coin_pending(id: String) -> bool:
@@ -553,11 +582,17 @@ func _draw() -> void:
 		draw_rect(Rect2(hp.floor() - Vector2.ONE, Vector2(2, 2)), Color(1, 1, 0.92))
 	# the purse at the heart
 	# the Emperor's denarius in the boss: it flips when you spend
-	var flip := cos(purse_pop * PI * 3.0) if purse_pop > 0.01 else 1.0
-	var face: Texture2D = TX.get("coin_head") if flip >= 0.0 else TX.get("coin_eagle")
-	if face != null:
-		var cw := maxf(2.0, 30.0 * absf(flip)) * (1.0 + purse_pop * 0.15)
-		draw_texture_rect(face, Rect2((CENTER - Vector2(cw * 0.5, 15)).round(), Vector2(roundf(cw), 30)), false)
+	var spin32: Texture2D = TX.get("aureus_spin_32_sheet")
+	if spin32 != null:
+		# 1.5 turns (18 frames of the 12-frame sheet) while purse_pop runs from 1 to 0; it settles head up
+		var fr := (int(round(purse_pop * 18.0)) % 12) if purse_pop > 0.01 else 0
+		draw_texture_rect_region(spin32, Rect2((CENTER - Vector2(16, 16)).round(), Vector2(32, 32)), Rect2(fr * 32, 0, 32, 32))
+	else:
+		var flip := cos(purse_pop * PI * 3.0) if purse_pop > 0.01 else 1.0
+		var face: Texture2D = TX.get("coin_head") if flip >= 0.0 else TX.get("coin_eagle")
+		if face != null:
+			var cw := maxf(2.0, 30.0 * absf(flip)) * (1.0 + purse_pop * 0.15)
+			draw_texture_rect(face, Rect2((CENTER - Vector2(cw * 0.5, 15)).round(), Vector2(roundf(cw), 30)), false)
 	var ns := str(int(round(purse_shown)))
 	var nw: float = Game.font.get_string_size(ns, HORIZONTAL_ALIGNMENT_LEFT, -1, 8).x
 	draw_rect(Rect2((CENTER + Vector2(-nw * 0.5 - 3, 16)).round(), Vector2(nw + 6, Game.font.get_height(8))), Color(0.08, 0.05, 0.03, 0.85))
@@ -572,6 +607,9 @@ func _draw() -> void:
 	fx.draw_shapes(self, false)
 	fx.draw_parts(self, true)
 	for q in coins:
+		if q.get("hero", false):
+			_draw_hero_coin(q)
+			continue
 		if q["k"] < 0.0:
 			continue
 		var k2: float = clamp(q["k"], 0.0, 1.0)

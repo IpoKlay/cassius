@@ -1356,6 +1356,7 @@ func _finish(won: bool) -> void:
 	var body := "\n".join(PackedStringArray(lines))
 	if won:
 		Game.denarii += int(cfg["reward_denarii"])
+		Game.sfx_coin_pickup(-8.0)       # quiet: the same screen counts the dead
 		Game.grain += int(cfg["reward_grain"])
 		Game.add_item(str(cfg["loot"]))
 		Game.leg_state["won"] = true

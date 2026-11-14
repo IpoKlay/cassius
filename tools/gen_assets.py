@@ -757,8 +757,13 @@ ITEM_ORDER = ["ivory", "serpent_ring", "gem", "gladius", "leather", "grain", "re
 
 
 def gen_ui():
-    coin(16).save(out("ui/coin.png"))
-    coin(64).save(out("ui/coin_big.png"))
+    # the hand-drawn aureus in assets/ui/aureus/ replaces the generated coin when it is there
+    for size, name in ((16, "coin.png"), (64, "coin_big.png")):
+        src = out("ui/aureus/aureus_%d_obverse.png" % size)
+        if os.path.exists(src):
+            Image.open(src).save(out("ui/" + name))
+        else:
+            coin(size).save(out("ui/" + name))
     im = new(16 * len(ITEM_ORDER), 16)
     d = ImageDraw.Draw(im)
 

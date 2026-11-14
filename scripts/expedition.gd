@@ -1176,7 +1176,7 @@ func open_shop(p: Dictionary) -> void:
 	var buy_grain := func():
 		Game.denarii -= 12
 		Game.grain += 10
-		Game.sfx("coin_pay", -6.0)
+		Game.sfx("coin_spend", -6.0)
 		Game.sfx("grain", -4.0)
 		Game.changed.emit()
 		open_shop(p)
@@ -1191,7 +1191,7 @@ func open_shop(p: Dictionary) -> void:
 			Game.denarii -= price
 			Game.add_item(id)
 			stock.erase(id)
-			Game.sfx("coin")
+			Game.sfx("coin_spend", -4.0)
 			open_shop(p)
 		var b := Game.button("%s  -  %d d" % [Game.L(str(it["name"])), price], buy, Game.denarii >= price)
 		b.icon = Game.item_icon(id)
@@ -1260,7 +1260,7 @@ func open_muster() -> void:
 			r["men"] += n
 			st["levy"] -= n
 			Game.marched += n
-			Game.sfx("coin")
+			Game.sfx("coin_spend", -4.0)
 			Game.changed.emit()
 			open_muster()
 		row.add_child(Game.button(Game.L("+%d men  %d d") % [n, cost * n], add_men, n > 0 and Game.denarii >= cost * n and not r["elite"]))
@@ -1296,7 +1296,7 @@ func open_muster() -> void:
 			st["levy"] -= 10
 			Game.marched += 10
 			Game.add_regiment(t, 10)
-			Game.sfx("coin")
+			Game.sfx("coin_spend", -4.0)
 			open_muster()
 		row2.add_child(Game.button("%s  %d d" % [Game.L(str(Game.UNITS[t]["name"])), c], raise, ok))
 	vb.add_child(Game.label(Game.L("Hastati hold lines and kill horses.  Scutarii soak arrows.  Sagittarii shred light armour.  Equites flank."), DIM, 386))

@@ -561,6 +561,18 @@ func go(scene_name: String) -> void:
 
 
 # ---------------------------------------------------------------- audio
+var _last_pickup := 0
+
+
+func sfx_coin_pickup(vol := -4.0) -> void:
+	## four pitched variants of the aureus pickup; never the same one twice in a row
+	var k := randi_range(1, 4)
+	if k == _last_pickup:
+		k = k % 4 + 1
+	_last_pickup = k
+	sfx("coin_pickup_%d" % k, vol)
+
+
 func sfx(sname: String, vol := 0.0, pitch := 1.0) -> void:
 	if not _sfx.has(sname):
 		if _sfx_missing.has(sname):
