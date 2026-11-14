@@ -920,8 +920,8 @@ func window(title: String, width := 300, closable := true) -> VBoxContainer:
 
 func _art_for(title: String) -> String:
 	var table := {"Camp": "camp", "Muster": "muster", "The baggage train": "pack", "The ledger": "ledger",
-		"The four realms": "map", "A roadside stall": "stall", "A river altar": "altar", "The road is held": "brief",
-		"The road divides": "cross", "The omen": "omen", "The toll": "brief"}
+		"A roadside stall": "stall", "A river altar": "altar", "The road is held": "brief",
+		"The omen": "omen", "The toll": "brief"}
 	for k in table:
 		if title == Game.L(k):
 			return table[k]
@@ -1029,19 +1029,18 @@ func open_ledger() -> void:
 		vb.add_child(Game.label("%s  (%s)" % [str(p["text"]), Game.L(str(p["state"]))], c, 318))
 
 
+func add_faction_atlas(vb: VBoxContainer, options: Array, height: int) -> void:
+	var map = preload("res://scripts/faction_atlas.gd").new()
+	map.options = options
+	map.custom_minimum_size.y = height
+	vb.add_child(map)
+
+
 func open_map() -> void:
-	var vb := window(Game.L("The four realms"), 260)
-	var tr := TextureRect.new()
-	tr.texture = _tex("ui/map")
-	tr.custom_minimum_size = Vector2(240, 150)
-	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	tr.stretch_mode = TextureRect.STRETCH_SCALE
-	vb.add_child(tr)
-	var names: Array = []
-	for r in Game.route_log:
-		names.append(Game.L(str(Game.REGIONS[r]["name"])))
-	vb.add_child(Game.label(Game.L("Road so far: ") + " > ".join(PackedStringArray(names)), null, 240))
-	vb.add_child(Game.label(Game.L("N Frostbay: oaths.  W Thorncrown: growth.  E Duskviolet: memory.  S Empire: wealth and lives."), DIM, 240))
+	var vb := window(Game.L("The four realms"), 450)
+	add_faction_atlas(vb, st["options"] if st["won"] else [], 188)
+	var legend := "Dashed: next roads     Solid: marched     Dark center: current" if Game.lang == "en" else "金色点线：可选路线    白色长线：已走过    方点：当前驻地"
+	vb.add_child(Game.label(legend, DIM, 420))
 
 
 # ------------------------------------------------------------------ shop
@@ -1614,32 +1613,31 @@ func _to_altar() -> void:
 
 
 func open_crossroads() -> void:
-	var vb := window(Game.L("The road divides"), 400)
+	var vb := window(Game.L("The road divides"), 450)
+	var opts: Array = st["options"]
+	add_faction_atlas(vb, opts, 164)
 	var need := Game.daily_need()
 	var warn := ""
 	if Game.grain < need:
 		warn = Game.L("You have only %d - men will die on the march.") % Game.grain
-	vb.add_child(Game.label(Game.L("Night. A day's march either way; the column will eat %d grain. %s") % [need, warn], DIM, 386))
-	var opts: Array = st["options"]
-	if opts[0] == "altar":
-		vb.add_child(Game.label(Game.L("There is only one road left. Torches on the hill ahead: the Great Altar, and the Emperor's auditors."), null, 386))
-		vb.add_child(Game.button(Game.L("Go up to the Great Altar"), _to_altar))
-		return
+	vb.add_child(Game.label(Game.L("Night. A day's march either way; the column will eat %d grain. %s") % [need, warn], DIM, 426))
 	var row := HBoxContainer.new()
 	vb.add_child(row)
 	for o in opts:
+		if o == "altar":
+			row.add_child(Game.button(Game.L("Go up to the Great Altar"), _to_altar))
+			continue
 		var rg: Dictionary = Game.REGIONS[o]
-		var card := VBoxContainer.new()
-		card.custom_minimum_size = Vector2(190, 0)
-		row.add_child(card)
-		card.add_child(Game.label(Game.L(str(rg["name"])), GOLDC))
-		card.add_child(Game.label(Game.L(str(rg["blurb"])), null, 186))
-		card.add_child(Game.label(Game.L("Altars here answer to %s.") % Game.L(str(rg["values_text"])), DIM, 186))
-		var visited: bool = Game.flags.has("event_" + str(o))
-		card.add_child(Game.label(Game.L("You have dealt with them before.") if visited else Game.L("They have something the ledger wants."), DIM, 186))
 		var est := 0
 		var fb: Dictionary = Game.make_battle(str(o), Game.leg + 1)
-		for g in fb["main"]:
-			est += int(g[1])
-		card.add_child(Game.label(Game.L("Scouts: about %d hold that road, not counting what hides. Recruits there: %d.") % [est, 22 if o == "south" else 12], DIM, 186))
-		card.add_child(Game.button(Game.L("March  (%s)") % Game.L(str(rg["road"])), _march.bind(str(o))))
+		for group in fb["main"]:
+			est += int(group[1])
+		var route := Game.button(Game.L(str(rg["name"])), _march.bind(str(o)))
+		route.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		route.tooltip_text = "\n".join(PackedStringArray([
+			Game.L(str(rg["blurb"])),
+			Game.L("Altars here answer to %s.") % Game.L(str(rg["values_text"])),
+			Game.L("You have dealt with them before.") if Game.flags.has("event_" + str(o)) else Game.L("They have something the ledger wants."),
+			Game.L("Scouts: about %d hold that road, not counting what hides. Recruits there: %d.") % [est, 22 if o == "south" else 12],
+		]))
+		row.add_child(route)
