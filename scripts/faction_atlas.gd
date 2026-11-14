@@ -22,15 +22,11 @@ const LANDMARKS := {
 	"north": preload("res://assets/expedition/landmarks/north.png"),
 	"east": preload("res://assets/expedition/landmarks/east.png"),
 }
-const SPARKS := {
-	"south": Color("#f9a15e"), "west": Color("#d6e47b"),
-	"north": Color("#b1effb"), "east": Color("#eab2ff"),
-}
 const INK := Color("#171d25")
 const GOLD := Color("#ffe3a1")
 var options: Array = []
 var overlay: Control
-var effects := Control.new()
+var tint: ShaderMaterial
 var phase := 0.0
 var animation_time := 0.0
 
@@ -43,70 +39,31 @@ func _ready() -> void:
 	layer.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	layer.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var tint := ShaderMaterial.new()
+	tint = ShaderMaterial.new()
 	tint.shader = TINT
 	tint.set_shader_parameter("water_mask", MASK)
 	for id in COLORS:
 		tint.set_shader_parameter(id, COLORS[id])
 	layer.material = tint
 	add_child(layer)
-	effects.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	effects.draw.connect(_draw_effects)
 	overlay = Control.new()
 	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	overlay.draw.connect(_draw_map)
 	overlay.resized.connect(overlay.queue_redraw)
 	add_child(overlay)
-	add_child(effects)
 
 func _process(delta: float) -> void:
 	animation_time += delta
 	var step := floorf(animation_time * 12.0) / 12.0
 	if step != phase:
 		phase = step
-		effects.queue_redraw()
+		tint.set_shader_parameter("weather_time", phase)
 
 func _point(id: String, area: Vector2) -> Vector2:
 	var at: Vector2 = (SITES[id] * area).round()
 	if id != "altar":
-		at.y = clampf(at.y, 31, maxf(31, area.y - 42))
+		at.y = clampf(at.y, 20, maxf(20, area.y - 34))
 	return at
-
-func _draw_effects() -> void:
-	for id in LANDMARKS:
-		var at := _point(id, effects.size)
-		var glow: Color = SPARKS[id]
-		var highlighted: bool = id == Game.region or id in options
-		var strength := 1.0 if highlighted else .62
-		# Pixels are stepped at 12 fps and only drawn while a map exists.
-		for i in range(16):
-			var angle := float(i) * TAU / 16.0
-			var ring_at := (at + Vector2(cos(angle) * 20, sin(angle) * 5 - 3)).round()
-			effects.draw_rect(Rect2(ring_at, Vector2(2, 1)), Color(glow, strength * (.40 + .25 * sin(angle * 2 - phase * 3))))
-		for i in range(13):
-			var life := fposmod(phase * (.28 + float(i % 3) * .07) + float(i) * .618, 1.0)
-			var alpha := sin(life * PI) * strength
-			var spread := float((i * 17) % 52) - 26
-			var point := Vector2.ZERO
-			var block := Vector2.ONE
-			match id:
-				"south":
-					point = Vector2(spread * (.65 + life * .35) + life * 8, -5 - life * 29)
-					block = Vector2(1, 2 if i % 3 == 0 else 1)
-				"west":
-					point = Vector2(spread * .65 + sin(phase * 2.0 + i) * 6 + life * 9, -30 + life * 26)
-					block = Vector2(2, 1)
-				"north":
-					point = Vector2(spread + life * 15, -31 + life * 27)
-					block = Vector2(2 if i % 3 == 0 else 1, 1)
-				"east":
-					var angle := life * TAU
-					point = Vector2(cos(angle) * (19 + i % 4), sin(angle) * 9 - 18 + float(i % 3) * 3)
-					block = Vector2(2, 1) if i % 3 == 0 else Vector2.ONE
-			var pixel := (at + point).round()
-			effects.draw_rect(Rect2(pixel, block), Color(glow, alpha))
-			if i % 5 == 0:
-				effects.draw_rect(Rect2(pixel + Vector2(-1, -1), Vector2(1, 2)), Color(glow, alpha * .48))
 
 func _draw_map() -> void:
 	var log: Array = Game.route_log
@@ -143,9 +100,9 @@ func _site(id: String, title: String, place: String, color: Color) -> void:
 	var active: bool = id == Game.region
 	if LANDMARKS.has(id):
 		var art: Texture2D = LANDMARKS[id]
-		overlay.draw_texture(art, at - Vector2(18, 30))
+		overlay.draw_texture(art, at - Vector2(11, 17))
 		if active or id in options:
-			var badge := at + Vector2(16, -19)
+			var badge := at + Vector2(11, -13)
 			overlay.draw_colored_polygon(PackedVector2Array([
 				badge + Vector2(0, -5), badge + Vector2(5, 0),
 				badge + Vector2(0, 5), badge + Vector2(-5, 0),
@@ -158,7 +115,7 @@ func _site(id: String, title: String, place: String, color: Color) -> void:
 	var font: Font = Game.font
 	var width := ceilf(maxf(font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 8).x,
 		font.get_string_size(place, HORIZONTAL_ALIGNMENT_LEFT, -1, 8).x)) + 8.0
-	var pos := Vector2(clampf(at.x - width * .5, 1, maxf(1, overlay.size.x - width - 1)), at.y + 7).round()
+	var pos := Vector2(clampf(at.x - width * .5, 1, maxf(1, overlay.size.x - width - 1)), at.y + 5).round()
 	overlay.draw_rect(Rect2(pos, Vector2(width, 13 if place.is_empty() else 27)), INK)
 	overlay.draw_rect(Rect2(pos, Vector2(width, 1)), color)
 	overlay.draw_string(font, pos + Vector2(4, 11), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 8, color)
