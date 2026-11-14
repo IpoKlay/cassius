@@ -40,6 +40,9 @@ var dust: Array = []
 var glow: Node2D
 var syn_was: Dictionary = {}
 var fx = preload("res://scripts/tree_fx.gd").new()
+var TX := {}                      # the bronze-shield art: scene, frames, icons, coin, laurel, eagle, wax tablet
+var wax_box: StyleBoxTexture
+const LAMP := Vector2(26, 244)
 ## each doctrine's own effect: a burst when learned, a living effect once mastered
 const THEME := {
 	"spear": "spears", "shield": "dome", "archer": "arrows", "cavalry": "hooves", "eagle": "feathers",
@@ -71,6 +74,16 @@ func _ready() -> void:
 	purse_shown = Game.denarii
 	for i in 90:
 		dust.append([Vector2(randf() * 310, randf() * 270), randf_range(0.2, 1.0), randf() * TAU])
+	for k in ["tree_bg", "corps_bronze", "corps_gold", "art_bronze", "art_gold", "spec_bronze", "spec_gold", "order_bronze", "order_gold",
+			"lore_bronze", "lore_gold", "coin_head", "coin_eagle", "laurel", "eagle", "wax_panel"]:
+		TX[k] = Game.load_tex("res://assets/tree/%s.png" % k)
+	for id in Game.TREE:
+		TX["i_" + str(id)] = Game.load_tex("res://assets/tree/icons/%s.png" % id)
+	if TX["wax_panel"] != null:
+		wax_box = StyleBoxTexture.new()
+		wax_box.texture = TX["wax_panel"]
+		for side in [SIDE_LEFT, SIDE_RIGHT, SIDE_TOP, SIDE_BOTTOM]:
+			wax_box.set_texture_margin(side, 8)
 	glow = Node2D.new()
 	var gm := CanvasItemMaterial.new()
 	gm.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
@@ -277,7 +290,7 @@ func _impact(id: String) -> void:
 		Game.sfx(snd, -1.0 if big else -3.5, 1.0 + 0.025 * (lv - 1))
 	else:
 		Game.sfx("upgrade", -4.0 if big else -7.0, 0.85 + 0.07 * lv)
-	var txt := Game.L("LV %d") % lv
+	var txt := _roman(lv)
 	if d.has("mile") and d["mile"].has(lv):
 		txt = Game.L(str(d["mile"][lv])).split(" - ")[0].to_upper()
 	elif kind == "spec" or kind == "lore":
@@ -469,16 +482,18 @@ func _syn_pending(sid: String) -> bool:
 # ------------------------------------------------------------------ drawing
 func _draw() -> void:
 	var off := Vector2(randf_range(-1, 1), randf_range(-1, 1)) * shake * 0.6
-	draw_rect(Rect2(0, 0, 480, 270), Color(0.025, 0.02, 0.035, 0.985))
-	for i in 10:
-		draw_circle(CENTER, 175.0 - i * 16.0, Color(0.18, 0.1, 0.07, 0.035))
+	draw_rect(Rect2(0, 0, 480, 270), Color(0.06, 0.04, 0.03))
+	if TX.get("tree_bg") != null:
+		# the lamp breathes: the whole table brightens and dims a touch
+		var fl := 0.93 + 0.05 * sin(t * 7.0) + 0.03 * sin(t * 17.3)
+		draw_texture(TX["tree_bg"], Vector2.ZERO, Color(fl, fl * 0.98, fl * 0.95))
 	for q in dust:
-		draw_circle(q[0], 0.35 + 0.3 * q[1], Color(1, 0.85, 0.6, 0.1 + 0.2 * q[1] * (0.6 + 0.4 * sin(t * 2.0 + q[2]))), true, -1.0, false)
+		draw_rect(Rect2(Vector2(q[0]).round(), Vector2.ONE), Color(1, 0.85, 0.6, 0.15 + 0.3 * q[1] * (0.6 + 0.4 * sin(t * 2.0 + q[2]))))
 	draw_set_transform(off)
-	_dash_ellipse(0, 40, t * 0.12, Color(0.55, 0.42, 0.3, 0.4))
-	_dash_ellipse(1, 70, -t * 0.07, Color(0.55, 0.42, 0.3, 0.3))
-	_dash_ellipse(2, 96, t * 0.05, Color(0.55, 0.42, 0.3, 0.22))
-	_dash_ellipse(3, 120, -t * 0.035, Color(0.7, 0.3, 0.25, 0.2))
+	if _all_corps_mastered():
+		var eg: Texture2D = TX.get("eagle")
+		if eg != null:
+			draw_texture(eg, (CENTER - Vector2(32, 30)).round(), Color(1, 1, 1, 0.85))
 	# synergy threads
 	for sid in syn_ids:
 		var sy: Dictionary = Game.SYNERGIES[sid]
@@ -515,19 +530,15 @@ func _draw() -> void:
 		var ring := int(d["ring"])
 		if ring == 0:
 			var lv := Game.lvl(id)
-			var c: Color = d["col"] if lv > 0 else LOCKED
-			draw_line(CENTER + (p - CENTER).normalized() * 15.0, p - (p - CENTER).normalized() * 12.0, Color(c.r, c.g, c.b, 0.3 + 0.13 * lv), 1.0)
+			_groove(CENTER + (p - CENTER).normalized() * 17.0, p - (p - CENTER).normalized() * 12.0, lv > 0)
 		elif d.has("parent"):
 			var par: Vector2 = pos[d["parent"]]
 			var a := par + (p - par).normalized() * (NR[0] + 1.0)
 			var b := p - (p - par).normalized() * (NR[ring] + 1.0)
 			if _sealed(id):
-				_dash(a, b, Color(0.35, 0.2, 0.2, 0.5))
-			elif Game.tree_open(id) or Game.lvl(id) > 0:
-				var c2: Color = d["col"]
-				draw_line(a, b, Color(c2.r, c2.g, c2.b, 0.55), 1.0)
+				_dash(a, b, Color(0.35, 0.12, 0.1, 0.8))
 			else:
-				_dash(a, b, LOCKED)
+				_groove(a, b, Game.lvl(id) > 0)
 		if d.has("rival") and str(d["rival"]) > id:          # the either/or bridge between two specialisations
 			var o: Vector2 = pos[d["rival"]]
 			var mid := (p + o) * 0.5 + (((p + o) * 0.5) - CENTER).normalized() * 6.0
@@ -541,15 +552,16 @@ func _draw() -> void:
 		draw_line(q["a"], hp, q["c"], 1.2)
 		draw_rect(Rect2(hp.floor() - Vector2.ONE, Vector2(2, 2)), Color(1, 1, 0.92))
 	# the purse at the heart
-	var pp := 1.0 + purse_pop * 0.3
-	draw_circle(CENTER, 14.0, Color(0.11, 0.08, 0.05), true, -1.0, false)
-	draw_arc(CENTER, 14.0, 0, TAU, 48, GOLD, 1.0)
-	draw_arc(CENTER, 12.0, t, t + PI * 1.2, 24, Color(GOLD.r, GOLD.g, GOLD.b, 0.35), 1.0)
-	draw_set_transform(CENTER + off, 0.0, Vector2(pp, pp))
-	draw_texture_rect(Game.tex_coin, Rect2(Vector2(-3, -10), Vector2(6, 6)), false)
+	# the Emperor's denarius in the boss: it flips when you spend
+	var flip := cos(purse_pop * PI * 3.0) if purse_pop > 0.01 else 1.0
+	var face: Texture2D = TX.get("coin_head") if flip >= 0.0 else TX.get("coin_eagle")
+	if face != null:
+		var cw := maxf(2.0, 30.0 * absf(flip)) * (1.0 + purse_pop * 0.15)
+		draw_texture_rect(face, Rect2((CENTER - Vector2(cw * 0.5, 15)).round(), Vector2(roundf(cw), 30)), false)
 	var ns := str(int(round(purse_shown)))
-	draw_string(Game.font, Vector2(-Game.font.get_string_size(ns, HORIZONTAL_ALIGNMENT_LEFT, -1, 8).x / 2.0, 7), ns, HORIZONTAL_ALIGNMENT_LEFT, -1, 8, GOLD)
-	draw_set_transform(off)
+	var nw: float = Game.font.get_string_size(ns, HORIZONTAL_ALIGNMENT_LEFT, -1, 8).x
+	draw_rect(Rect2((CENTER + Vector2(-nw * 0.5 - 3, 16)).round(), Vector2(nw + 6, Game.font.get_height(8))), Color(0.08, 0.05, 0.03, 0.85))
+	draw_string(Game.font, (CENTER + Vector2(-nw * 0.5, 16 + Game.font.get_ascent(8))).round(), ns, HORIZONTAL_ALIGNMENT_LEFT, -1, 8, GOLD)
 	for id in ids:                                      # mastered doctrines keep their effect alive, behind the wheel
 		if Game.lvl(id) > 0 and Game.tree_cost(id) < 0:
 			fx.draw_ambient(self, str(THEME.get(id, "")), id, pos[id], NR[_ring(id)])
@@ -638,48 +650,91 @@ func _draw_node(id: String) -> void:
 	var cost := Game.tree_cost(id)
 	var can := open_ and cost >= 0 and Game.denarii >= cost
 	var c: Color = d["col"] if ((open_ or lv > 0) and not sealed) else LOCKED
-	if kind == "lore" and known and lv == 0:
-		c = TEAL
-	var r: float = NR[ring] * float(a["s"]) * float(a["ts"]) * (1.0 + float(a["punch"]) + float(a["pop"]) * 0.3)
-	if r < 0.8:
+	var sc: float = float(a["s"]) * float(a["ts"]) * (1.0 + float(a["punch"]) + float(a["pop"]) * 0.3)
+	if sc < 0.08:
 		return
 	var p: Vector2 = pos[id] + Vector2(sin(t * 60.0) * 3.0 * float(a["shake"]) / 0.35, 0)
+	var r: float = NR[ring] * sc
+	var mastered := lv >= mx
+	var frame_key := kind + ("_gold" if mastered or (kind != "corps" and kind != "art" and lv > 0) else "_bronze")
+	var fr: Texture2D = TX.get(frame_key)
+	# state: locked pieces are dull, sealed ones near black, learnable ones breathe
+	var tint := Color.WHITE
+	if sealed:
+		tint = Color(0.3, 0.26, 0.26)
+	elif lv == 0 and not open_:
+		tint = Color(0.36, 0.33, 0.3)
 	if can:
 		var br := 0.5 + 0.5 * sin(t * 4.0 + ids.find(id))
-		_outline(kind, p, r + 2.5 + br * 1.2, Color(c.r, c.g, c.b, 0.2 + 0.3 * br), 1.0)
-	_shape(kind, p, r, Color(0.07, 0.055, 0.05) if not sealed else Color(0.05, 0.045, 0.045))
-	_shape(kind, p, r - 2.2, Color(c.r * 0.2, c.g * 0.2, c.b * 0.2))
-	if kind == "corps" or kind == "art":
-		draw_arc(p, r - 1.0, 0, TAU, 48, Color(0.2, 0.18, 0.16), 1.6)
-		var f: float = a["fill"]
-		if f > 0.001:
-			draw_arc(p, r - 1.0, -PI / 2.0, -PI / 2.0 + TAU * f, maxi(6, int(48 * f)), c.lightened(0.2) if lv < mx else GOLD, 1.6)
+		draw_arc(p, r + 3.0 + br, 0, TAU, 32, Color(1.0, 0.9, 0.6, 0.55 + 0.4 * br), 1.0)
+	# a dark seat under every piece lifts it off the bronze
+	draw_circle(p + Vector2(1, 2), r + 2.0, Color(0.03, 0.015, 0.0, 0.55))
+	draw_circle(p, r + 1.0, Color(0.05, 0.03, 0.01, 0.6))
+	if mastered and kind == "corps" and TX.get("laurel") != null:
+		var ls := 36.0 * sc
+		draw_texture_rect(TX["laurel"], Rect2((p - Vector2(ls, ls) * 0.5).round(), Vector2(ls, ls).round()), false)
+	if fr != null:
+		var fs := fr.get_size() * sc
+		draw_texture_rect(fr, Rect2((p - fs * 0.5).round(), fs.round()), false, tint)
+	else:
+		draw_circle(p, r, Color(0.3, 0.2, 0.1))
+	# drills: corps fill five slots cut in the rim with molten gold; arts show three pips
+	if kind == "corps":
 		for k in mx:
 			var ang := -PI / 2.0 + TAU * k / mx
-			draw_line(p + Vector2.from_angle(ang) * (r - 2.4), p + Vector2.from_angle(ang) * (r + 0.4), Color(0.04, 0.03, 0.03), 1.0)
-	else:
-		var oc: Color = (GOLD if kind != "order" else Color(1, 0.35, 0.25)) if lv > 0 else Color(c.r, c.g, c.b, 0.6)
-		_outline(kind, p, r - 0.6, oc, 1.2 if lv > 0 else 0.7)
+			var col := Color(1.0, 0.86, 0.4) if k < lv else Color(0.12, 0.07, 0.04)
+			draw_arc(p, 9.9 * sc, ang - 0.2, ang + 0.2, 4, col, 2.0)
+	elif kind == "art":
+		for k in mx:
+			var pp2 := p + Vector2((k - (mx - 1) * 0.5) * 4.0, 10.0) * sc
+			draw_rect(Rect2(pp2.round() - Vector2(1, 1), Vector2(3, 3)), Color(0.1, 0.06, 0.04))
+			draw_rect(Rect2(pp2.round(), Vector2(1, 1)), Color(1.0, 0.86, 0.4) if k < lv else Color(0.35, 0.28, 0.2))
 	var fl: float = a["flash"]
 	if fl > 0.0:
-		_shape(kind, p, r, Color(1, 1, 0.92, fl * 0.75))
+		draw_circle(p, r, Color(1, 1, 0.92, fl * 0.6))
 	elif fl < 0.0:
-		_shape(kind, p, r, Color(1, 0.2, 0.15, -fl * 0.5))
+		draw_circle(p, r, Color(1, 0.2, 0.15, -fl * 0.45))
+	var ic: Texture2D = TX.get("i_" + id)
 	if not known:
-		draw_string(Game.font, p + Vector2(-2.5, 3), "?", HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(0.45, 0.42, 0.4))
-	else:
-		_icon(str(d["icon"]), p, r * 0.5, c.lightened(0.35) if (open_ or lv > 0) and not sealed else Color(0.38, 0.35, 0.32))
+		draw_string(Game.font, p + Vector2(-2.5, 3), "?", HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(0.25, 0.2, 0.16))
+	elif ic != null:
+		var isz := 12.0 * sc
+		var itint := Color.WHITE if (open_ or lv > 0) and not sealed else Color(0.3, 0.28, 0.26, 0.9)
+		draw_texture_rect(ic, Rect2((p - Vector2(isz, isz) * 0.5 - Vector2(0, 1 if kind == "art" else 0)).round(), Vector2(isz, isz).round()), false, itint)
 	if sealed:
-		draw_line(p + Vector2(-r * 0.6, -r * 0.6), p + Vector2(r * 0.6, r * 0.6), Color(0.6, 0.25, 0.2, 0.8), 1.0)
-		draw_line(p + Vector2(r * 0.6, -r * 0.6), p + Vector2(-r * 0.6, r * 0.6), Color(0.6, 0.25, 0.2, 0.8), 1.0)
+		draw_line(p + Vector2(-r * 0.6, -r * 0.6), p + Vector2(r * 0.6, r * 0.6), Color(0.75, 0.2, 0.15, 0.9), 1.0)
+		draw_line(p + Vector2(r * 0.6, -r * 0.6), p + Vector2(-r * 0.6, r * 0.6), Color(0.75, 0.2, 0.15, 0.9), 1.0)
 	if id == sel:
 		for k in 4:
 			var ang2 := t * 2.0 + k * PI / 2.0
 			draw_line(p + Vector2.from_angle(ang2) * (r + 3.0), p + Vector2.from_angle(ang2) * (r + 6.0), Color(1, 0.95, 0.8), 1.0)
 	if not open_ and lv == 0 and not sealed and known:
 		var lp := p + Vector2(r * 0.45, r * 0.35)
-		draw_rect(Rect2(lp, Vector2(3.4, 2.6)), Color(0.5, 0.45, 0.4))
-		draw_arc(lp + Vector2(1.7, 0), 1.1, PI, TAU, 8, Color(0.5, 0.45, 0.4), 1.0)
+		draw_rect(Rect2(lp, Vector2(3.4, 2.6)), Color(0.3, 0.26, 0.22))
+		draw_arc(lp + Vector2(1.7, 0), 1.1, PI, TAU, 8, Color(0.3, 0.26, 0.22), 1.0)
+
+
+func _groove(a: Vector2, b: Vector2, lit: bool) -> void:
+	## a channel cut in the bronze; once a drill is learned, molten gold runs down it
+	# unlearned paths stay a faint scratch so the eye goes to what is learned
+	if not lit:
+		draw_line(a, b, Color(0.08, 0.04, 0.02, 0.5), 1.0)
+		return
+	draw_line(a, b, Color(0.1, 0.05, 0.02, 0.9), 3.0)
+	draw_line(a, b, Color(1.0, 0.78, 0.3), 1.0)
+	var k := fmod(t * 0.6 + a.x * 0.01, 1.0)
+	draw_rect(Rect2(a.lerp(b, k).round(), Vector2.ONE), Color(1, 1, 0.85))
+
+
+func _all_corps_mastered() -> bool:
+	for id in ids:
+		if _kind(id) == "corps" and Game.lvl(id) < int(Game.TREE[id]["max"]):
+			return false
+	return true
+
+
+func _roman(n: int) -> String:
+	return ["0", "I", "II", "III", "IV", "V", "VI"][clampi(n, 0, 6)]
 
 
 func _draw_glow() -> void:
@@ -693,6 +748,20 @@ func _draw_glow() -> void:
 		if float(anim[id]["flash"]) > 0.0:
 			g.draw_circle(p, r * 2.6, Color(c.r, c.g, c.b, 0.3 * float(anim[id]["flash"])), true, -1.0, false)
 	g.draw_circle(CENTER, 22.0, Color(1, 0.75, 0.35, 0.05 + 0.03 * sin(t * 1.5)), true, -1.0, false)
+	var lf := 0.9 + 0.1 * sin(t * 7.0) + 0.05 * sin(t * 17.3)
+	g.draw_circle(LAMP + Vector2(0, -6), 60.0 * lf, Color(1.0, 0.6, 0.25, 0.05), true, -1.0, false)
+	g.draw_circle(LAMP + Vector2(0, -6), 26.0 * lf, Color(1.0, 0.7, 0.3, 0.08), true, -1.0, false)
+	g.draw_rect(Rect2(LAMP + Vector2(-2, -12 - sin(t * 13.0)), Vector2(3, 4)), Color(1.0, 0.85, 0.4, 0.9))
+	# every few seconds a glint of lamplight slides across the shield
+	var sw := fmod(t, 7.0) / 1.4
+	if sw < 1.0:
+		var bx := CENTER.x - 170.0 + sw * 340.0
+		for yy in range(int(CENTER.y - 126.0), int(CENTER.y + 126.0), 1):
+			var dy := (yy - CENTER.y) / 126.0
+			var half := 162.0 * sqrt(maxf(0.0, 1.0 - dy * dy))
+			var x0 := bx + (yy - CENTER.y) * 0.5
+			if x0 > CENTER.x - half and x0 < CENTER.x + half:
+				g.draw_rect(Rect2(x0, yy, 4, 1), Color(1.0, 0.85, 0.55, 0.07 * sin(sw * PI)))
 	for id in ids:
 		if Game.lvl(id) > 0 and Game.tree_cost(id) < 0:
 			fx.draw_ambient_glow(g, str(THEME.get(id, "")), pos[id], NR[_ring(id)])
@@ -716,14 +785,17 @@ func _draw_glow() -> void:
 
 
 func _draw_panel() -> void:
-	draw_rect(PANEL, Color(0.075, 0.055, 0.045, 0.97))
+	if wax_box != null:
+		draw_style_box(wax_box, PANEL.grow(2))
+	else:
+		draw_rect(PANEL, Color(0.075, 0.055, 0.045, 0.97))
 	var x := PANEL.position.x + 8
 	var y := PANEL.position.y + 13
 	if sel.begins_with("syn:"):
 		var sid := sel.substr(4)
 		var sy: Dictionary = Game.SYNERGIES[sid]
 		var sc: Color = sy["col"]
-		draw_rect(PANEL, Color(sc.r, sc.g, sc.b, 0.7), false, 1.0)
+		draw_rect(PANEL.grow(-6), Color(sc.r, sc.g, sc.b, 0.35), false, 1.0)
 		draw_string(Game.font, Vector2(x, y), Game.L(str(sy["name"])).to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, 8, sc)
 		y += 1 + Game.LH
 		draw_string(Game.font, Vector2(x, y), Game.L("SYNERGY   ") + (Game.L("ACTIVE") if Game.syn(sid) else Game.L("dormant")), HORIZONTAL_ALIGNMENT_LEFT, -1, 8, GOLD if Game.syn(sid) else DIM)
@@ -743,13 +815,13 @@ func _draw_panel() -> void:
 	var kind := _kind(id)
 	var known := _known(id)
 	var c: Color = d["col"] if known else DIM
-	draw_rect(PANEL, Color(c.r, c.g, c.b, 0.7), false, 1.0)
+	draw_rect(PANEL.grow(-6), Color(c.r, c.g, c.b, 0.35), false, 1.0)
 	draw_string(Game.font, Vector2(x, y), Game.L(str(d["name"])).to_upper() if known else "? ? ?", HORIZONTAL_ALIGNMENT_LEFT, -1, 8, c.lightened(0.2))
 	y += 1 + Game.LH
 	var tags := {"corps": Game.L("CORPS"), "art": Game.L("ART"), "spec": Game.L("SPECIALISATION"), "order": Game.L("WAR-ORDER"), "lore": Game.L("LORE")}
 	var head: String = tags[kind]
 	if mx > 1:
-		head += Game.L("   level %d / %d") % [lv, mx]
+		head += "   %s / %s" % [_roman(lv), _roman(mx)]
 	elif lv > 0:
 		head += Game.L("   LEARNED")
 	draw_string(Game.font, Vector2(x, y), head, HORIZONTAL_ALIGNMENT_LEFT, -1, 8, DIM)
@@ -768,7 +840,7 @@ func _draw_panel() -> void:
 		if d.has("mile"):
 			y += 3
 			for m in d["mile"]:
-				y = _wrap((Game.L("LV%d  ") % int(m)) + Game.L(str(d["mile"][m])), x, y + 1 + Game.LH, GOLD if lv >= int(m) else Color(0.55, 0.5, 0.45))
+				y = _wrap((_roman(int(m)) + "  ") + Game.L(str(d["mile"][m])), x, y + 1 + Game.LH, GOLD if lv >= int(m) else Color(0.55, 0.5, 0.45))
 		if d.has("rival"):
 			var rn := Game.L(str(Game.TREE[d["rival"]]["name"]))
 			y = _wrap((Game.L("SEALED: you chose %s") % rn) if _sealed(id) else (Game.L("Choosing this seals %s for the run") % rn), x, y + 3 + Game.LH, BAD if _sealed(id) else DIM)

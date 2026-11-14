@@ -493,4 +493,9 @@ const D := {
 	"New campaign": "新的征程",
 	"Quit": "退出",
 	"arrows / mouse  -  Enter": "方向键 / 鼠标  -  回车",
+	"The fort": "要塞",
+	"Choose the next road: click a glowing stop": "选择下一条路：点击发光的地点",
+	"solid: marched   dashed: by sea   [WASD / drag] look   [M / Esc] close": "实线：已行军   虚线：渡海   [WASD/拖动] 查看   [M/Esc] 关闭",
+	"Day %d   Leg %d of %d": "第 %d 天   第 %d / %d 段",
+	"Choose on the map": "在地图上选择",
 }

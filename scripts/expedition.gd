@@ -2,9 +2,14 @@ extends Node
 ## The march, Hades-style: a real 3D world seen through a tilted orthographic camera and rendered
 ## at 480x270 so every mesh comes out as pixels. Free 8-way movement; every stop is a decision.
 
-const U := 22.0                 # leg data (Game.leg_state) is in old "road pixels"; 22 of them = 1 world unit
-const PX := 12.0 / 270.0        # world size of one screen pixel (camera size 12 over 270 rows)
-const ROAD_HALF := 3.4
+const U := 1.0                  # leg data (Game.leg_state) is in road pixels, and so is the 2D world
+const GROUND_Y := 176.0          # where feet stand (top of the grass on the stone ledge)
+const WATER_Y := 204.0           # foot of the ledge; below it the river mirrors the world (Kingdom-style)
+const SKY := {"south": [Color8(88, 180, 192), Color8(207, 230, 200)], "west": [Color8(106, 158, 200), Color8(214, 226, 208)],
+	"north": [Color8(122, 144, 170), Color8(223, 228, 232)], "east": [Color8(74, 58, 120), Color8(232, 180, 168)]}
+const WATER := {"south": Vector3(0.22, 0.52, 0.5), "west": Vector3(0.2, 0.3, 0.28), "north": Vector3(0.24, 0.32, 0.4), "east": Vector3(0.26, 0.2, 0.36)}
+const WALK := 70.0               # pixels per second
+const GALLOP := 124.0
 const GOLDC := Color(0.96, 0.8, 0.42)
 const DIM := Color(0.62, 0.57, 0.5)
 const BAD := Color(0.95, 0.45, 0.38)
@@ -18,6 +23,10 @@ const CREAM := Color(0.68, 0.6, 0.44)
 const TAN := Color(0.59, 0.46, 0.33)
 
 var keys_label: Label
+var art_hint := ""
+const VIGNETTE = preload("res://scripts/vignette.gd")
+const UI_FX = preload("res://scripts/ui_fx.gd")
+const WORLD_MAP = preload("res://scripts/world_map.gd")
 var PAL := {
 	"south": {"grass": Color8(84, 92, 44), "grass_hi": Color8(150, 140, 62), "dirt": Color8(104, 80, 60), "leaf": Color8(52, 66, 36), "leaf_hi": Color8(140, 120, 56), "trunk": Color8(62, 44, 36)},
 	"west": {"grass": Color8(56, 104, 50), "grass_hi": Color8(130, 176, 80), "dirt": Color8(92, 82, 52), "leaf": Color8(30, 76, 44), "leaf_hi": Color8(96, 150, 74), "trunk": Color8(52, 42, 30)},
@@ -28,34 +37,42 @@ var PAL := {
 var st: Dictionary
 var region := "south"
 var length := 80.0              # world units
-var pos := Vector3.ZERO
+var pos := Vector2.ZERO
 var facing := 1
 var anim_t := 0.0
 var busy := false
 var near = null
 var wall_toast_cd := 0.0
 
-var world: Node3D
-var cam: Camera3D
-var cam_off := Vector3.ZERO
-var cam_basis := Basis.IDENTITY
-var cam_right := Vector3.RIGHT
-var cam_fwd := Vector3.FORWARD
-var cam_focus := Vector3.ZERO
-var sun: DirectionalLight3D
-var torch: OmniLight3D
-var env: Environment
+var world: Node2D                # everything at road depth (parallax 1.0)
+var cam_x := 0.0                 # left edge of the screen, in road pixels
+var layers: Array = []           # [Sprite2D, parallax factor]
+var sky_mat: ShaderMaterial
 var water_mat: ShaderMaterial
 var fog_mat: ShaderMaterial
-var mats := {}
-var shadow_mat: StandardMaterial3D
-var player: Sprite3D
+var tint_mod: CanvasModulate
+var torch: PointLight2D
+var player: Sprite2D
 var followers: Array = []
 var anims: Array = []
 var poi_nodes: Array = []
-var tint_sprites: Array = []
 var fire_lights: Array = []
-var priest_spr: Sprite3D = null
+var priest_spr: Sprite2D = null
+var wfx: Node2D                  # weather, embers, hoof dust (world space)
+var fg: Node2D                   # dark foreground grass in front of the column
+var birds: Array = []
+var parts: Array = []
+var fg_bits: Array = []
+var night_k := 0.0
+var rays: Node2D
+var ray_k := 0.0
+var rain := false
+var tufts: Array = []
+var falls: Array = []
+var hud_box: Control
+var idle_t := 0.0
+var show_t := 3.0
+var keys_t := 0.0
 var ui: CanvasLayer
 var menu_layer: CanvasLayer
 var fx_layer: CanvasLayer
@@ -76,7 +93,7 @@ func _ready() -> void:
 	st = Game.leg_state
 	region = Game.region
 	length = float(st["length"]) / U
-	pos = Vector3(float(st["x"]) / U, 0.0, float(st.get("z", 0.0)))
+	pos = Vector2(float(st["x"]) / U, GROUND_Y)
 	Game.music("ambient")
 	_build_world()
 	_build_overlays()
@@ -88,347 +105,259 @@ func _ready() -> void:
 	if Game.flags.has("toast"):
 		say(str(Game.flags["toast"]), 5.0)
 		Game.flags.erase("toast")
-	if pos.x < 4.0 and not st["won"]:
+	if pos.x < 90.0 and not st["won"]:
 		_show_leg_title()
-	if Game.leg == 0 and pos.x < 4.0 and not st["won"]:
+	if Game.leg == 0 and pos.x < 90.0 and not st["won"]:
 		say(Game.L("The north road. Ride east. Make camp at the standard."), 5.0)
 
 
-# ------------------------------------------------------------------ 3D kit
+# ------------------------------------------------------------------ 2D kit (side view, Kingdom-style)
 func _tex(path: String) -> Texture2D:
-	return load("res://assets/%s.png" % path)
+	return Game.load_tex("res://assets/%s.png" % path)
 
 
-func _mat(c: Color) -> StandardMaterial3D:
-	var k := c.to_html()
-	if not mats.has(k):
-		var m := StandardMaterial3D.new()
-		m.albedo_color = c
-		m.roughness = 1.0
-		m.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
-		mats[k] = m
-	return mats[k]
-
-
-func _mesh(mesh: Mesh, at: Vector3, c: Color, parent: Node3D = null) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.material_override = _mat(c)
-	mi.position = at
-	if parent == null:
-		parent = world
-	parent.add_child(mi)
-	return mi
-
-
-func _box(size: Vector3, center: Vector3, c: Color, parent: Node3D = null) -> MeshInstance3D:
-	var m := BoxMesh.new()
-	m.size = size
-	return _mesh(m, center, c, parent)
-
-
-func _cyl(r_top: float, r_bot: float, h: float, base: Vector3, c: Color, parent: Node3D = null) -> MeshInstance3D:
-	var m := CylinderMesh.new()
-	m.top_radius = r_top
-	m.bottom_radius = r_bot
-	m.height = h
-	m.radial_segments = 7
-	m.rings = 1
-	return _mesh(m, base + Vector3(0, h / 2.0, 0), c, parent)
-
-
-func _ball(r: float, center: Vector3, c: Color, parent: Node3D = null) -> MeshInstance3D:
-	var m := SphereMesh.new()
-	m.radius = r
-	m.height = r * 2.0
-	m.radial_segments = 8
-	m.rings = 4
-	return _mesh(m, center, c, parent)
-
-
-func _prism(size: Vector3, base: Vector3, c: Color, parent: Node3D = null) -> MeshInstance3D:
-	var m := PrismMesh.new()
-	m.size = size
-	return _mesh(m, base + Vector3(0, size.y / 2.0, 0), c, parent)
-
-
-func _actor(tex_path: String, hframes: int, at: Vector3, shadow_r := 0.35, lit := true) -> Sprite3D:
-	## a pixel sprite standing in the 3D world: billboarded, 1 texel = 1 screen pixel, feet on the origin
-	var s := Sprite3D.new()
-	s.texture = _tex(tex_path)
+func _sprite(path: String, hframes: int, at: Vector2, parent: Node = null) -> Sprite2D:
+	## a pixel sprite standing on the road: feet on `at`
+	var s := Sprite2D.new()
+	s.texture = _tex(path)
 	s.hframes = hframes
-	s.pixel_size = PX
-	s.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	s.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
-	s.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
-	s.shaded = false
-	s.offset = Vector2(0, s.texture.get_height() / 2.0)
-	s.position = at
-	s.set_meta("base", Color.WHITE)
-	world.add_child(s)
-	if lit:
-		tint_sprites.append(s)
-	if shadow_r > 0.0:
-		var m := CylinderMesh.new()
-		m.top_radius = shadow_r
-		m.bottom_radius = shadow_r
-		m.height = 0.02
-		m.radial_segments = 10
-		m.rings = 1
-		var sh := MeshInstance3D.new()
-		sh.mesh = m
-		sh.material_override = shadow_mat
-		sh.position = Vector3(0, 0.03, 0)
-		sh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		s.add_child(sh)
+	s.centered = false
+	if s.texture != null:
+		s.offset = Vector2(-s.texture.get_width() / float(hframes) / 2.0, -s.texture.get_height())
+	s.position = at.round()
+	(parent if parent != null else world).add_child(s)
 	return s
 
 
-func _rot(n: Node3D, r: Vector3) -> void:
-	n.rotation = r
+func _light(at: Vector2, scale_: float, energy: float, col := Color(1.0, 0.62, 0.3), parent: Node = null) -> PointLight2D:
+	var l := PointLight2D.new()
+	l.texture = _tex("props/glow")
+	l.texture_scale = scale_
+	l.energy = energy
+	l.color = col
+	l.position = at
+	l.set_meta("base", energy)
+	(parent if parent != null else world).add_child(l)
+	return l
 
 
-func _fire(at: Vector3, light_range := 7.0) -> void:
-	anims.append([_actor("props/campfire", 4, at, 0.0, false), 4, 9.0, 0])
-	var l := OmniLight3D.new()
-	l.light_color = Color(1.0, 0.62, 0.3)
-	l.omni_range = light_range
-	l.position = at + Vector3(0, 0.9, 0.3)
-	world.add_child(l)
-	fire_lights.append(l)
+func _fire(at: Vector2, size_ := 1.0) -> void:
+	anims.append([_sprite("props/campfire", 4, at), 4, 9.0, 0])
+	fire_lights.append(_light(at + Vector2(0, -8), 1.6 * size_, 1.0))
+	parts_src.append(at + Vector2(0, -10))
 
 
-func _tree(at: Vector3, conifer: bool, sc: float, pal: Dictionary) -> void:
-	var t := Node3D.new()
-	t.position = at
-	t.scale = Vector3(sc, sc, sc)
-	world.add_child(t)
-	var leaf: Color = pal["leaf"]
-	var hi: Color = pal["leaf_hi"]
-	if conifer:
-		_cyl(0.12, 0.17, 1.0, Vector3.ZERO, pal["trunk"], t)
-		for i in 3:
-			_cyl(0.0, 1.15 - i * 0.27, 1.5, Vector3(0, 0.75 + i * 0.95, 0), leaf.lerp(hi, i * 0.22), t)
-	else:
-		_cyl(0.13, 0.2, 1.9, Vector3.ZERO, pal["trunk"], t)
-		_ball(1.15, Vector3(0, 2.7, 0), leaf, t)
-		_ball(0.8, Vector3(0.75, 2.3, 0.3), leaf.lerp(hi, 0.25), t)
-		_ball(0.75, Vector3(-0.7, 2.5, -0.2), leaf.lerp(hi, 0.12), t)
-		_ball(0.6, Vector3(0.1, 3.5, 0.1), leaf.lerp(hi, 0.4), t)
+var parts_src: Array = []        # places embers rise from
+
+
+func _tile_layer(path: String, y: float, factor: float, z: int, haze := 0.0, drift := 0.0) -> void:
+	## a horizontally repeating backdrop strip that scrolls at `factor` of the road speed
+	var tx := _tex(path)
+	if tx == null:
+		return
+	var s := Sprite2D.new()
+	s.texture = tx
+	s.centered = false
+	s.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+	s.region_enabled = true
+	s.region_rect = Rect2(0, 0, 480.0 + tx.get_width() * 2.0, tx.get_height())
+	s.position = Vector2(0, y)
+	s.z_index = z
+	var hm: ShaderMaterial = null
+	if haze > 0.0:
+		hm = ShaderMaterial.new()
+		hm.shader = load("res://shaders/haze.gdshader")
+		hm.set_shader_parameter("amount", haze)
+		s.material = hm
+	add_child(s)
+	layers.append([s, factor, hm, haze, float(tx.get_width()), drift])
 
 
 func _near_poi(x: float, margin: float) -> bool:
 	for p in st["pois"]:
-		if abs(float(p["x"]) / U - x) < margin:
+		if absf(float(p["x"]) / U - x) < margin:
 			return true
 	return false
 
 
 # ------------------------------------------------------------------ construction
 func _build_world() -> void:
-	world = Node3D.new()
-	add_child(world)
 	var pal: Dictionary = PAL[region]
-	shadow_mat = StandardMaterial3D.new()
-	shadow_mat.albedo_color = Color(0, 0, 0, 0.35)
-	shadow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	shadow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	# light and sky
-	var we := WorldEnvironment.new()
-	env = Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.02, 0.02, 0.04)
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color.WHITE
-	env.ambient_light_energy = 0.55
-	we.environment = env
-	world.add_child(we)
-	sun = DirectionalLight3D.new()
-	sun.shadow_enabled = true
-	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
-	sun.directional_shadow_max_distance = 60.0
-	world.add_child(sun)
-	torch = OmniLight3D.new()            # Cassius carries a torch once the light goes
-	torch.light_color = Color(1.0, 0.7, 0.4)
-	torch.omni_range = 6.5
-	torch.light_energy = 0.0
-	world.add_child(torch)
-	# the Hades camera: orthographic, looking down and slightly across the road
-	cam_off = Vector3(-0.35, 1.0, 0.85).normalized() * 40.0
-	cam = Camera3D.new()
-	cam.projection = Camera3D.PROJECTION_ORTHOGONAL
-	cam.size = 12.0
-	cam.near = 0.1
-	cam.far = 140.0
-	world.add_child(cam)
-	cam.position = cam_off
-	cam.look_at(Vector3.ZERO, Vector3.UP)
-	cam_basis = cam.basis
-	cam_right = Vector3(cam_basis.x.x, 0, cam_basis.x.z).normalized()
-	cam_fwd = Vector3(-cam_basis.z.x, 0, -cam_basis.z.z).normalized()
-	cam_focus = Vector3(clamp(pos.x, 6.0, length - 4.0), 0, pos.z * 0.5)
-	cam.position = cam_focus + cam_off
-	cam.current = true
-	# ground, road, river
-	var mid := length / 2.0
-	_box(Vector3(length + 140.0, 1.0, 140.0), Vector3(mid, -0.5, 0), pal["grass"])
-	var dirt: Color = pal["dirt"]
-	_box(Vector3(length + 60.0, 0.1, ROAD_HALF * 2.0 + 0.6), Vector3(mid, -0.04, 0), dirt)
-	_box(Vector3(length + 60.0, 0.1, 0.25), Vector3(mid, -0.035, -1.1), dirt.darkened(0.18))    # cart ruts
-	_box(Vector3(length + 60.0, 0.1, 0.25), Vector3(mid, -0.035, 1.1), dirt.darkened(0.18))
-	_box(Vector3(length + 140.0, 0.1, 0.5), Vector3(mid, -0.03, 4.45), dirt.darkened(0.35))      # river bank
-	var wm := PlaneMesh.new()
-	wm.size = Vector2(length + 140.0, 60.0)
-	var water := MeshInstance3D.new()
-	water.mesh = wm
-	water_mat = ShaderMaterial.new()
-	water_mat.shader = load("res://shaders/water3d.gdshader")
-	water.material_override = water_mat
-	water.position = Vector3(mid, 0.02, 34.6)
-	water.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	world.add_child(water)
-	# forest wall north of the road, thinner scatter near it
+	var rt: Color = Game.REGIONS[region]["tint"]
+	# sky lives on its own layer so the day/night tint does not darken it twice
+	var sky_layer := CanvasLayer.new()
+	sky_layer.layer = -1
+	add_child(sky_layer)
+	var sky := ColorRect.new()
+	sky.position = Vector2(0, 0)
+	sky.size = Vector2(480, WATER_Y)
+	sky_mat = ShaderMaterial.new()
+	sky_mat.shader = load("res://shaders/sky.gdshader")
+	sky.material = sky_mat
+	sky_layer.add_child(sky)
+	# parallax backdrops, far to near (painted per region: clouds, distant ridge, the range, the near wood)
+	_tile_layer("road/%s_clouds" % region, 4, 0.04, -50, 0.0, 2.5)
+	_tile_layer("road/%s_ridge" % region, GROUND_Y - 120.0, 0.08, -45, 0.5)
+	_tile_layer("road/%s_mountains" % region, GROUND_Y - 142.0, 0.15, -40, 0.25)
+	_tile_layer("road/%s_mid" % region, GROUND_Y - 148.0, 0.45, -20, 0.1)
+	_tile_layer("road/%s_ledge" % region, GROUND_Y - 6.0, 1.0, -3)
+	rays = Node2D.new()
+	rays.z_index = -22
+	add_child(rays)
+	rays.draw.connect(_draw_rays)
+	# the road world
+	world = Node2D.new()
+	add_child(world)
+	tint_mod = CanvasModulate.new()
+	add_child(tint_mod)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash("%s-%d" % [region, Game.leg])
-	var conif: bool = region == "north" or region == "west"
-	for row in 4:
-		var x := -24.0
-		while x < length + 24.0:
-			x += rng.randf_range(1.3, 3.2)
-			var z := -rng.randf_range(7.5 + row * 3.0, 11.0 + row * 3.5)
-			if row == 0 and _near_poi(x, 3.5):
-				continue
-			_tree(Vector3(x, 0, z), conif if rng.randf() < 0.8 else not conif, rng.randf_range(0.85, 1.35), pal)
-	var x2 := 0.0
-	while x2 < length:
-		x2 += rng.randf_range(2.5, 7.0)
-		if _near_poi(x2, 4.0):
+	rain = (region == "west" and rng.randf() < 0.5) or (region == "south" and rng.randf() < 0.25) or (region == "east" and rng.randf() < 0.3)
+	# trees behind the road, thinned out around stops so they stay readable
+	var x := -60.0
+	while x < length + 80.0:
+		x += rng.randf_range(40.0, 110.0)
+		if _near_poi(x, 70.0):
 			continue
-		var z2 := -rng.randf_range(4.2, 6.8)
-		var roll := rng.randf()
-		if roll < 0.3:
-			_tree(Vector3(x2, 0, z2), conif, rng.randf_range(0.6, 0.9), pal)
-		elif roll < 0.6:
-			var rock := _ball(rng.randf_range(0.3, 0.6), Vector3(x2, 0.1, z2), STONE_D)
-			rock.scale = Vector3(1.3, 0.7, 1.0)
-		elif roll < 0.8:
-			_ball(rng.randf_range(0.35, 0.55), Vector3(x2, 0.2, z2), pal["leaf"].lerp(pal["leaf_hi"], 0.2))
-		else:
-			_cyl(0.2, 0.2, 1.4, Vector3(x2, 0, z2), STONE)         # milestone / broken column
-	# grass tufts (pixel sprites) on both verges and reeds on the bank
-	var tuft := _tex("bg/%s_tufts" % region)
-	var tx := -6.0
-	while tx < length + 6.0:
-		tx += rng.randf_range(0.5, 1.6)
-		var tz := rng.randf_range(3.7, 4.3) if rng.randf() < 0.45 else -rng.randf_range(3.8, 7.0)
-		var ts := _actor("bg/%s_tufts" % region, 1, Vector3(tx, 0, tz), 0.0)
-		ts.texture = tuft
-		ts.region_enabled = true
-		ts.region_rect = Rect2((rng.randi() % 8) * 12, 0, 12, 10)
-		ts.offset = Vector2(0, 5)
+		var tr := _sprite("road/%s_tree%d" % [region, rng.randi() % 4], 1, Vector2(x, GROUND_Y + 1.0))
+		tr.z_index = -4
+		tr.flip_h = rng.randf() < 0.5
+	# Roman things left along the road: broken columns, milestones, amphorae, a statue, a fallen capital
+	var dx := 0.0
+	while dx < length:
+		dx += rng.randf_range(90.0, 210.0)
+		if _near_poi(dx, 60.0):
+			continue
+		var dk: int = [0, 1, 2, 4, 5, 1][rng.randi() % 6]
+		var dc := _sprite("road/r_deco%d" % dk, 1, Vector2(dx, GROUND_Y + 1.0))
+		dc.z_index = -2
+	# bright grass clumps hanging over the ledge face, and plants on the verge in front of the column
+	var px := -10.0
+	while px < length + 20.0:
+		px += rng.randf_range(40.0, 120.0)
+		var cl := _sprite("road/%s_plant3" % region, 1, Vector2(px, GROUND_Y + 14.0))
+		cl.z_index = -2
+	px = -10.0
+	while px < length + 20.0:
+		px += rng.randf_range(50.0, 140.0)
+		var kind := rng.randi() % 3
+		var pl := _sprite("road/%s_plant%d" % [region, kind], 1, Vector2(px, GROUND_Y + 5.0))
+		pl.z_index = 6
+		pl.flip_h = rng.randf() < 0.5
+		if kind == 2:
+			tufts.append(pl)
+	# little streams spilling off the ledge into the river
+	var fx2 := 80.0
+	while fx2 < length:
+		fx2 += rng.randf_range(220.0, 420.0)
+		falls.append(fx2)
 	for p in st["pois"]:
 		_build_poi(p, pal)
 	# the column: each one follows the one in front
-	var defs := [["sprites/soldier0", 10, 4, 4, 6, 1.1, 0.25], ["sprites/soldier1", 10, 4, 4, 6, 0.8, 0.25], ["sprites/soldier2", 10, 4, 4, 6, 0.8, 0.25],
-		["sprites/ox", 10, 4, 4, 6, 1.2, 0.5], ["sprites/cart", 5, 1, 1, 4, 1.5, 0.6]]
+	var defs := [["sprites/soldier0", 10, 4, 4, 6, 24.0], ["sprites/soldier1", 10, 4, 4, 6, 18.0], ["sprites/soldier2", 10, 4, 4, 6, 18.0],
+		["sprites/ox", 10, 4, 4, 6, 26.0], ["sprites/cart", 5, 1, 1, 4, 33.0]]
 	var back := 0.0
-	for d in defs:
-		if d[0] == "sprites/ox" and not Game.inventory.has("white_ox"):
+	for dd in defs:
+		if dd[0] == "sprites/ox" and not Game.inventory.has("white_ox"):
 			continue
-		back += float(d[5])
-		var s := _actor(str(d[0]), int(d[1]), Vector3(pos.x - back, 0, pos.z), float(d[6]))
-		followers.append({"spr": s, "idle_n": d[3], "walk_at": d[2], "walk_n": d[4], "gap": float(d[5]), "t": randf() * 3.0})
-	player = _actor("sprites/cassius", 12, pos, 0.55)
+		back += float(dd[5])
+		var s := _sprite(str(dd[0]), int(dd[1]), Vector2(pos.x - back, GROUND_Y))
+		s.z_index = 2
+		followers.append({"spr": s, "idle_n": dd[3], "walk_at": dd[2], "walk_n": dd[4], "gap": float(dd[5]), "t": randf() * 3.0, "x": pos.x - back})
+	player = _sprite("sprites/cassius", 12, pos)
+	player.z_index = 3
+	torch = _light(Vector2(6, -22), 2.4, 0.0, Color(1.0, 0.72, 0.42), player)
+	# weather, embers and dust; and a dark band of foreground grass for depth
+	wfx = Node2D.new()
+	wfx.z_index = 8
+	world.add_child(wfx)
+	wfx.draw.connect(_draw_wfx)
+	fg = Node2D.new()
+	fg.z_index = 20
+	add_child(fg)
+	var fx := -40.0
+	while fx < length * 1.35 + 600.0:
+		fx += rng.randf_range(30.0, 110.0)
+		fg_bits.append([fx, rng.randf_range(6, 16), rng.randi() % 3, rng.randf() * TAU])
+	for i in 3:
+		birds.append([randf() * 600.0, randf_range(40, 110), randf_range(14, 24), randf() * TAU])
+	# the river: mirrors everything above the waterline
+	var wl := CanvasLayer.new()
+	wl.layer = 1
+	add_child(wl)
+	var water := ColorRect.new()
+	water.position = Vector2(0, WATER_Y)
+	water.size = Vector2(480, 270.0 - WATER_Y)
+	water_mat = ShaderMaterial.new()
+	water_mat.shader = load("res://shaders/water.gdshader")
+	water_mat.set_shader_parameter("line_v", WATER_Y / 270.0)
+	water_mat.set_shader_parameter("stretch", 1.0)
+	water.material = water_mat
+	water.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wl.add_child(water)
+	cam_x = clamp(pos.x - 200.0, 0.0, max(0.0, length - 480.0))
 
 
 func _build_poi(p: Dictionary, pal: Dictionary) -> void:
 	var x := float(p["x"]) / U
-	var node := {"poi": p, "x": x, "at": Vector3(x, 0, -3.0)}
+	var node := {"poi": p, "x": x, "top": GROUND_Y - 40.0}
+	var g := GROUND_Y
 	match p["type"]:
 		"camp":
-			_prism(Vector3(2.6, 1.7, 2.4), Vector3(x - 2.2, 0, -5.6), TAN)
-			_prism(Vector3(0.8, 1.0, 0.06), Vector3(x - 2.2, 0, -4.38), Color(0.1, 0.07, 0.06))
-			_prism(Vector3(2.0, 1.3, 2.0), Vector3(x + 0.6, 0, -6.6), TAN.darkened(0.15))
-			_cyl(0.04, 0.04, 2.6, Vector3(x, 0, -4.3), WOODC)                       # the standard
-			_box(Vector3(0.6, 0.7, 0.05), Vector3(x + 0.3, 2.1, -4.3), REDC)
-			_ball(0.09, Vector3(x, 2.65, -4.3), GOLDC)
-			_rot(_box(Vector3(0.9, 0.12, 0.12), Vector3(x + 1.9, 0.08, -4.0), WOOD_D), Vector3(0, 0.6, 0))
-			_rot(_box(Vector3(0.9, 0.12, 0.12), Vector3(x + 1.9, 0.08, -4.0), WOODC), Vector3(0, -0.6, 0))
-			_fire(Vector3(x + 1.9, 0.05, -4.0))
-			_box(Vector3(0.6, 0.6, 0.6), Vector3(x + 3.2, 0.3, -5.0), WOODC)
-			_rot(_box(Vector3(0.5, 0.5, 0.5), Vector3(x + 3.7, 0.25, -4.5), WOOD_D), Vector3(0, 0.4, 0))
-			_ball(0.35, Vector3(x + 3.0, 0.25, -4.3), CREAM)
+			var t1 := _sprite("road/r_tent", 1, Vector2(x - 46, g))
+			t1.z_index = -1
+			var t2 := _sprite("road/r_tent", 1, Vector2(x - 18, g - 3))
+			t2.z_index = -2
+			t2.modulate = Color(0.85, 0.85, 0.85)
+			anims.append([_sprite("props/banner", 4, Vector2(x, g)), 4, 4.0, 0])
+			_fire(Vector2(x + 30, g + 1))
+			_sprite("road/r_deco3", 1, Vector2(x + 54, g + 1))
+			node["top"] = g - 46.0
 		"shop":
-			_box(Vector3(3.6, 1.9, 0.15), Vector3(x, 0.95, -5.9), WOOD_D)           # back boards
-			_box(Vector3(3.2, 0.8, 0.7), Vector3(x, 0.4, -4.7), WOODC)              # counter
-			for sx in [-1.7, 1.7]:
-				_cyl(0.07, 0.07, 2.1, Vector3(x + sx, 0, -4.4), WOODC)
-				_cyl(0.07, 0.07, 2.5, Vector3(x + sx, 0, -5.9), WOODC)
-			for i in 9:                                                             # faded striped awning
-				var slat := _box(Vector3(0.4, 0.05, 1.7), Vector3(x - 1.6 + i * 0.4, 2.25, -5.1), REDC.darkened(0.1) if i % 2 == 0 else CREAM)
-				_rot(slat, Vector3(0.26, 0, 0))
-			var goods := [GOLDC, Color(0.7, 0.3, 0.24), CREAM, Color(0.35, 0.55, 0.63), Color(0.6, 0.43, 0.27), GOLDC.darkened(0.3)]
-			for i in goods.size():
-				_box(Vector3(0.22, 0.26, 0.22), Vector3(x - 1.25 + i * 0.5, 0.93, -4.7), goods[i])
-			_rot(_box(Vector3(0.6, 0.6, 0.6), Vector3(x - 2.4, 0.3, -4.6), WOODC), Vector3(0, 0.3, 0))
-			_cyl(0.16, 0.3, 0.8, Vector3(x + 2.3, 0, -5.2), Color(0.59, 0.35, 0.24))  # amphora
-			_box(Vector3(0.16, 0.2, 0.16), Vector3(x, 1.85, -4.5), Color(1.0, 0.84, 0.47))
-			var lamp := OmniLight3D.new()
-			lamp.light_color = Color(1.0, 0.75, 0.4)
-			lamp.omni_range = 5.0
-			lamp.position = Vector3(x, 1.7, -4.2)
-			world.add_child(lamp)
-			fire_lights.append(lamp)
-			anims.append([_actor("sprites/merchant", 4, Vector3(x + 2.9, 0, -4.2)), 4, 3.0, 0])
+			var shp := _sprite("road/r_shop", 1, Vector2(x, g + 1))
+			shp.z_index = -1
+			anims.append([_sprite("sprites/merchant", 4, Vector2(x + 50, g)), 4, 3.0, 0])
+			fire_lights.append(_light(Vector2(x, g - 40), 1.4, 0.9, Color(1.0, 0.78, 0.45)))
+			node["top"] = g - 62.0
 		"altar":
-			_box(Vector3(3.4, 0.25, 2.4), Vector3(x, 0.125, -5.4), STONE_D)
-			_box(Vector3(2.8, 0.25, 1.9), Vector3(x, 0.375, -5.4), STONE)
-			_box(Vector3(1.7, 0.8, 1.0), Vector3(x, 0.9, -5.4), STONE)
-			_box(Vector3(2.0, 0.15, 1.3), Vector3(x, 1.375, -5.4), STONE.lightened(0.2))
-			_box(Vector3(0.12, 0.6, 0.02), Vector3(x - 0.3, 1.0, -4.89), Color(0.45, 0.1, 0.1))   # old blood
-			_cyl(0.32, 0.2, 0.16, Vector3(x, 1.45, -5.4), GOLDC.darkened(0.25))
-			_fire(Vector3(x, 1.6, -5.4), 8.0)
-			_cyl(0.2, 0.22, 1.9, Vector3(x - 2.1, 0, -6.0), STONE)
-			_cyl(0.2, 0.22, 1.0, Vector3(x + 2.1, 0, -6.0), STONE)
-			_rot(_cyl(0.2, 0.2, 0.7, Vector3(x + 2.8, 0.2, -5.2), STONE_D), Vector3(0, 0, 1.4))   # fallen drum
-			priest_spr = _actor("sprites/priest", 12, Vector3(x + 1.8, 0, -4.1))
+			var al := _sprite("road/r_altar", 1, Vector2(x, g + 1))
+			al.z_index = -1
+			anims.append([_sprite("props/campfire", 4, Vector2(x, g - 38)), 4, 9.0, 0])
+			fire_lights.append(_light(Vector2(x, g - 44), 2.0, 1.1))
+			parts_src.append(Vector2(x, g - 48))
+			priest_spr = _sprite("sprites/priest", 12, Vector2(x + 40, g))
 			anims.append([priest_spr, 4, 3.0, 0])
+			node["top"] = g - 50.0
 		"event":
-			anims.append([_actor("sprites/villager", 4, Vector3(x - 0.3, 0, -3.9)), 4, 3.0, 0])
-			var v2 := _actor("sprites/villager", 4, Vector3(x + 0.5, 0, -4.3))
+			anims.append([_sprite("sprites/villager", 4, Vector2(x - 8, g)), 4, 3.0, 0])
+			var v2 := _sprite("sprites/villager", 4, Vector2(x + 10, g))
 			v2.flip_h = true
-			v2.set_meta("base", Color(0.85, 0.8, 0.9))
+			v2.modulate = Color(0.85, 0.8, 0.9)
 			anims.append([v2, 4, 2.6, 1])
-			_box(Vector3(1.2, 0.4, 0.7), Vector3(x + 1.7, 0.5, -4.6), WOODC)                       # handcart
-			_rot(_cyl(0.3, 0.3, 0.08, Vector3(x + 1.7, 0.26, -4.2), WOOD_D), Vector3(PI / 2.0, 0, 0))
-			_ball(0.3, Vector3(x + 1.6, 0.85, -4.6), CREAM)
+			var cart := _sprite("sprites/cart", 5, Vector2(x + 40, g))
+			cart.modulate = Color(0.8, 0.75, 0.7)
+			node["top"] = g - 30.0
 		"warning":
-			node["at"] = Vector3(x, 0, 0)
-			var w := _actor("props/warning", 4, Vector3(x, 0, -3.7), 0.2, false)
-			anims.append([w, 4, 5.0, 0])
+			var w := _sprite("road/r_hostile", 1, Vector2(x, g + 1))
 			node["spr"] = w
-			var barrier := Node3D.new()                                                         # stakes across the road
+			var barrier := Node2D.new()
 			world.add_child(barrier)
-			var bz := -3.0
-			while bz <= 3.0:
-				_rot(_box(Vector3(0.1, 1.5, 0.1), Vector3(x + 1.7, 0.6, bz), WOOD_D, barrier), Vector3(0.7, 0, 0))
-				_rot(_box(Vector3(0.1, 1.5, 0.1), Vector3(x + 1.7, 0.6, bz), WOODC, barrier), Vector3(-0.7, 0, 0))
-				bz += 1.2
-			_box(Vector3(0.1, 0.1, 6.6), Vector3(x + 1.7, 0.6, 0), WOOD_D, barrier)
+			for k in 7:
+				var stake := Line2D.new()
+				stake.width = 2.0
+				stake.default_color = WOOD_D if k % 2 else WOODC
+				var bx := x + 34.0 + k * 5.0
+				stake.points = PackedVector2Array([Vector2(bx - 6, g + 2), Vector2(bx + 4, g - 20)]) if k % 2 else PackedVector2Array([Vector2(bx + 6, g + 2), Vector2(bx - 4, g - 20)])
+				barrier.add_child(stake)
 			node["barrier"] = barrier
 			if st["won"]:
 				barrier.visible = false
 				w.modulate = Color(0.45, 0.45, 0.45)
+			node["top"] = g - 34.0
 		"crossroads":
-			node["at"] = Vector3(x, 0, 0)
-			_cyl(0.18, 0.12, 0.5, Vector3(x - 1.3, 0, -3.9), STONE_D)       # a brazier, so the fork can be read at night
-			_fire(Vector3(x - 1.3, 0.5, -3.9), 9.0)
-			_cyl(0.06, 0.06, 2.0, Vector3(x, 0, -3.7), WOOD_D)
-			_rot(_box(Vector3(1.1, 0.25, 0.06), Vector3(x + 0.4, 1.7, -3.7), WOODC), Vector3(0, 0.5, 0))
-			_rot(_box(Vector3(1.1, 0.25, 0.06), Vector3(x + 0.4, 1.3, -3.7), WOODC), Vector3(0, -0.5, 0))
-			var dirt: Color = pal["dirt"]
-			_rot(_box(Vector3(26.0, 0.1, 3.0), Vector3(x + 14.0, -0.036, -6.0), dirt), Vector3(0, 0.42, 0))   # the two roads onward
-			_rot(_box(Vector3(26.0, 0.1, 3.0), Vector3(x + 14.0, -0.036, 6.0), dirt), Vector3(0, -0.42, 0))
+			_sprite("road/r_signpost", 1, Vector2(x, g + 1))
+			_fire(Vector2(x - 28, g + 1), 1.2)
+			node["top"] = g - 38.0
 	poi_nodes.append(node)
 
 
@@ -443,6 +372,20 @@ func _build_overlays() -> void:
 	fog_mat.shader = load("res://shaders/fog.gdshader")
 	fog.material = fog_mat
 	fl.add_child(fog)
+	# the "old fresco" grade: earthy limited palette, warm and a little faded, darker corners
+	var gl := CanvasLayer.new()
+	gl.layer = 3
+	add_child(gl)
+	var grade := ColorRect.new()
+	grade.size = Vector2(480, 270)
+	grade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var gm := ShaderMaterial.new()
+	gm.shader = load("res://shaders/retro.gdshader")
+	gm.set_shader_parameter("strength", 0.22)
+	gm.set_shader_parameter("warmth", 0.12)
+	gm.set_shader_parameter("vignette", 0.3)
+	grade.material = gm
+	gl.add_child(grade)
 
 
 func _build_ui() -> void:
@@ -454,17 +397,20 @@ func _build_ui() -> void:
 	root.size = Vector2(480, 270)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(root)
-	for r in [Rect2(0, 0, 480, 20), Rect2(0, 250, 480, 20)]:
-		var bar := ColorRect.new()
-		bar.color = Color.BLACK
-		bar.position = r.position
-		bar.size = r.size
-		bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		root.add_child(bar)
+	# Kingdom keeps the screen clean: the purse and the count fade in only when you stop or something changes
+	hud_box = Control.new()
+	hud_box.size = Vector2(480, 24)
+	hud_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(hud_box)
+	var shade := ColorRect.new()
+	shade.size = Vector2(480, 20)
+	shade.color = Color(0, 0, 0, 0.35)
+	shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud_box.add_child(shade)
 	var row := HBoxContainer.new()
-	row.position = Vector2(8, 2)
+	row.position = Vector2(8, 3)
 	row.add_theme_constant_override("separation", 3)
-	root.add_child(row)
+	hud_box.add_child(row)
 	row.add_child(Game.icon_rect(Game.tex_coin))
 	hud["denarii"] = Game.label("0", GOLDC)
 	row.add_child(hud["denarii"])
@@ -482,9 +428,12 @@ func _build_ui() -> void:
 	hud["day"].position = Vector2(300, 6)
 	hud["day"].size = Vector2(172, 10)
 	hud["day"].horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	root.add_child(hud["day"])
+	hud_box.add_child(hud["day"])
+	for k in ["denarii", "grain", "men", "tribute", "day"]:
+		_shadow(hud[k])
 	keys_label = Game.label(Game.L("WASD ride    Shift gallop    F interact    I pack    L ledger    M map"), DIM)
 	keys_label.position = Vector2(8, 256)
+	_shadow(keys_label)
 	root.add_child(keys_label)
 	Game.lang_changed.connect(_on_lang_changed)
 	prompt = Game.label("", Color(1, 0.95, 0.8))
@@ -558,6 +507,8 @@ func _refresh_hud() -> void:
 		_pop(hud["denarii"], Game.denarii > last_denarii)
 	if last_grain >= 0 and Game.grain != last_grain:
 		_pop(hud["grain"], Game.grain > last_grain)
+	if last_denarii >= 0 and (Game.denarii != last_denarii or Game.grain != last_grain):
+		show_t = 2.5          # a change always shows the purse
 	last_denarii = Game.denarii
 	last_grain = Game.grain
 	hud["grain"].text = Game.L("%d / %d grain  (-%d a day)") % [Game.grain, Game.QUOTA, Game.daily_need()]
@@ -600,7 +551,6 @@ func _on_ledger(text: String) -> void:
 		return
 	ledger_note.text = Game.L("written in the ledger:  ") + text
 	ledger_note.modulate.a = 0.0
-	Game.sfx("click", -10.0, 0.55)
 	var tw := create_tween()
 	tw.tween_property(ledger_note, "modulate:a", 1.0, 0.25)
 	tw.tween_interval(4.0)
@@ -628,83 +578,220 @@ func say(text: String, secs := 3.5) -> void:
 func _process(delta: float) -> void:
 	anim_t += delta
 	wall_toast_cd -= delta
-	var iv := Vector2.ZERO
-	if not busy:
+	var dir := 0.0
+	if not busy and not Game.settings_open:
 		if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
-			iv.x += 1.0
+			dir += 1.0
 		if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
-			iv.x -= 1.0
-		if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
-			iv.y += 1.0
-		if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
-			iv.y -= 1.0
-	var speed := 3.2
-	if Input.is_key_pressed(KEY_SHIFT):
-		speed = 5.6
+			dir -= 1.0
+	var galloping := Input.is_key_pressed(KEY_SHIFT)
+	var speed := GALLOP if galloping else WALK
 	if Game.lvl("forced") > 0:
 		speed *= 1.4
-	var moving: bool = iv != Vector2.ZERO
+	var moving: bool = dir != 0.0
 	if moving:
-		var mv: Vector3 = (cam_right * iv.x + cam_fwd * iv.y).normalized()
-		pos += mv * speed * delta
-		if iv.x != 0.0:
-			facing = 1 if iv.x > 0.0 else -1
-		var max_x := length - 1.5
+		pos.x += dir * speed * delta
+		facing = 1 if dir > 0.0 else -1
+		var max_x := length - 30.0
 		if not st["won"]:
 			for n in poi_nodes:
 				if n["poi"]["type"] == "warning":
-					max_x = float(n["x"]) + 1.0
+					max_x = float(n["x"]) + 22.0
 			if pos.x > max_x and wall_toast_cd <= 0.0:
 				wall_toast_cd = 6.0
 				say(Game.L("The road ahead is held. Give battle at the marker - or prepare first."))
-		pos.x = clamp(pos.x, 1.5, max_x)
-		pos.z = clamp(pos.z, -ROAD_HALF, ROAD_HALF)
-	if moving:
+		pos.x = clamp(pos.x, 30.0, max_x)
 		hoof_t -= delta
 		if hoof_t <= 0.0:
-			hoof_t = 0.2 if speed > 4.0 else 0.32
+			hoof_t = 0.16 if galloping else 0.3
 			Game.sfx("thud", -24.0, randf_range(1.5, 1.9))
+			if galloping:
+				for k in 3:
+					parts.append({"k": "dust", "p": Vector2(pos.x - facing * 8.0, GROUND_Y - 1.0), "v": Vector2(-facing * randf_range(10, 30), -randf_range(4, 14)), "life": 0.7, "max": 0.7})
 	st["x"] = pos.x * U
-	st["z"] = pos.z
-	player.position = pos
+	player.position = pos.round()
 	player.flip_h = facing < 0
 	if moving:
-		player.frame = 4 + int(anim_t * (14.0 if speed > 4.0 else 9.0)) % 8
+		player.frame = 4 + int(anim_t * (14.0 if galloping else 9.0)) % 8
 	else:
 		player.frame = int(anim_t * 3.0) % 4
-	# the column: a chain, each follows whoever is in front
-	var lead := pos
+	# the column: a chain, each keeps its distance from whoever is in front
+	var lead := pos.x
 	for f in followers:
-		var spr: Sprite3D = f["spr"]
-		var p: Vector3 = spr.position
-		var d: Vector3 = lead - p
-		var dist: float = d.length()
+		var spr: Sprite2D = f["spr"]
+		var fx: float = f["x"]
 		var gap: float = f["gap"]
-		if dist > gap + 0.05:
-			var stp: float = min(dist - gap, speed * 1.15 * delta)
-			p += d / dist * stp
-			spr.position = p
-			var sx: float = d.dot(cam_right)
-			if abs(sx) > 0.05:
-				spr.flip_h = sx < 0.0
-			f["t"] += delta
-			spr.frame = int(f["walk_at"]) + int(f["t"] * 9.0) % int(f["walk_n"])
+		var d := lead - fx
+		if absf(d) > gap + 1.0:
+			var stp: float = min(absf(d) - gap, speed * 1.15 * delta)
+			fx += signf(d) * stp
+			spr.flip_h = d < 0.0
+			f["t"] = float(f["t"]) + delta
+			spr.frame = int(f["walk_at"]) + int(float(f["t"]) * 9.0) % int(f["walk_n"])
 		else:
-			spr.frame = int(anim_t * 3.0 + gap * 7.0) % int(f["idle_n"])
-		lead = p
+			spr.frame = int(anim_t * 3.0 + gap * 0.3) % int(f["idle_n"])
+		f["x"] = fx
+		spr.position = Vector2(roundf(fx), GROUND_Y)
+		lead = fx
 	for a in anims:
-		var s: Sprite3D = a[0]
-		if s == priest_spr and busy and ritual_playing:
+		var sp: Sprite2D = a[0]
+		if sp == priest_spr and busy and ritual_playing:
 			continue
-		s.frame = (int(a[3]) + int(anim_t * float(a[2]))) % int(a[1])
-	# camera follows, snapped to whole screen pixels so the world does not shimmer
-	var want := Vector3(clamp(pos.x + facing * 1.5, 6.0, length - 4.0), 0, pos.z * 0.5)
-	cam_focus = cam_focus.lerp(want, min(1.0, delta * 3.0))
-	var cp: Vector3 = cam_focus + cam_off
-	cam.position = cam_basis.x * snappedf(cam_basis.x.dot(cp), PX) + cam_basis.y * snappedf(cam_basis.y.dot(cp), PX) + cam_basis.z * cam_basis.z.dot(cp)
-	fog_mat.set_shader_parameter("scroll", cam_focus.x * U)
+		sp.frame = (int(a[3]) + int(anim_t * float(a[2]))) % int(a[1])
+	# camera leads the rider a little; whole pixels only
+	var want: float = clamp(pos.x + facing * 50.0 - 240.0, 0.0, max(0.0, length - 480.0))
+	cam_x = lerp(cam_x, want, min(1.0, delta * 2.6))
+	var cx := roundf(cam_x)
+	world.position.x = -cx
+	for l in layers:
+		var spr2: Sprite2D = l[0]
+		spr2.position.x = -roundf(fmod(cx * float(l[1]) + anim_t * float(l[5]), float(l[4])))
+	idle_t = 0.0 if moving else idle_t + delta
+	show_t -= delta
+	hud_box.modulate.a = move_toward(hud_box.modulate.a, 1.0 if (idle_t > 0.8 or show_t > 0.0 or busy) else 0.15, delta * 2.5)
+	keys_t += delta
+	keys_label.modulate.a = move_toward(keys_label.modulate.a, 0.0 if keys_t > 8.0 and not busy else 0.85, delta * 0.8)
+	for tf in tufts:
+		var sx: float = tf.position.x - cx
+		if sx > -20.0 and sx < 500.0:
+			tf.skew = sin(anim_t * 1.6 + tf.position.x * 0.045) * 0.18 + (0.08 if rain else 0.0)
+	_update_parts(delta)
+	rays.queue_redraw()
+	wfx.queue_redraw()
+	fg.queue_redraw()
+	fog_mat.set_shader_parameter("scroll", cx)
+	water_mat.set_shader_parameter("scroll", cx)
 	_apply_time()
 	_update_prompt()
+
+
+func _update_parts(delta: float) -> void:
+	var view := Rect2(cam_x - 20.0, 0, 520, 270)
+	# region weather, spawned across the visible stretch of road
+	var wx := cam_x + randf() * 480.0
+	match region:
+		"north":
+			if randf() < delta * 50.0:
+				parts.append({"k": "snow", "p": Vector2(wx, 16), "v": Vector2(randf_range(-10, -2), randf_range(14, 26)), "life": 12.0, "max": 12.0})
+		"west":
+			if randf() < delta * 3.0:
+				parts.append({"k": "leaf", "p": Vector2(wx, 60 + randf() * 60), "v": Vector2(randf_range(-14, -6), randf_range(8, 14)), "life": 9.0, "max": 9.0, "ph": randf() * TAU})
+		"east":
+			if randf() < delta * 6.0:
+				parts.append({"k": "mote", "p": Vector2(wx, 120 + randf() * 80), "v": Vector2(randf_range(-3, 3), -randf_range(3, 8)), "life": 5.0, "max": 5.0, "c": Color(0.78, 0.66, 0.84)})
+		_:
+			if randf() < delta * 3.0:
+				parts.append({"k": "mote", "p": Vector2(wx, 150 + randf() * 50), "v": Vector2(randf_range(-4, 4), -randf_range(1, 4)), "life": 5.0, "max": 5.0, "c": Color(1.0, 0.9, 0.65)})
+	if rain:
+		for k in int(delta * 260.0) + (1 if randf() < fmod(delta * 260.0, 1.0) else 0):
+			parts.append({"k": "rain", "p": Vector2(cam_x + randf() * 560.0 - 40.0, 10), "v": Vector2(-40, 260), "life": 1.0, "max": 1.0})
+	# fireflies after dusk
+	if night_k > 0.3 and randf() < delta * 4.0 * night_k:
+		parts.append({"k": "firefly", "p": Vector2(wx, GROUND_Y - randf_range(6, 40)), "v": Vector2(randf_range(-4, 4), randf_range(-3, 3)), "life": 4.0, "max": 4.0, "ph": randf() * TAU})
+	# embers from every fire in view
+	for src in parts_src:
+		var sp: Vector2 = src
+		if view.has_point(Vector2(sp.x, 100)) and randf() < delta * 7.0:
+			parts.append({"k": "ember", "p": sp + Vector2(randf_range(-3, 3), 0), "v": Vector2(randf_range(-5, 5), -randf_range(14, 30)), "life": 1.4, "max": 1.4})
+	for q in parts:
+		q["life"] = float(q["life"]) - delta
+		var v: Vector2 = q["v"]
+		if q["k"] == "leaf":
+			v.x += sin(anim_t * 2.0 + float(q["ph"])) * 10.0 * delta
+			q["v"] = v
+		if q["k"] == "dust":
+			q["v"] = v * 0.92
+		q["p"] = Vector2(q["p"]) + v * delta
+		if q["k"] == "firefly":
+			q["p"] = Vector2(q["p"]) + Vector2(sin(anim_t * 1.7 + float(q["ph"])), cos(anim_t * 1.3 + float(q["ph"]))) * delta * 8.0
+	parts = parts.filter(func(q): return float(q["life"]) > 0.0 and Vector2(q["p"]).y < (GROUND_Y + 2.0 if q["k"] == "rain" else WATER_Y + 2.0))
+	for b in birds:
+		b[0] = fmod(float(b[0]) + float(b[2]) * delta, 700.0)
+
+
+func _draw_wfx() -> void:
+	for q in parts:
+		var al: float = clamp(float(q["life"]) / float(q["max"]) * 1.5, 0.0, 1.0)
+		var pp: Vector2 = Vector2(q["p"]).round()
+		match str(q["k"]):
+			"snow":
+				wfx.draw_rect(Rect2(pp, Vector2(1, 1)), Color(1, 1, 1, 0.9 * al))
+			"leaf":
+				var lc := Color(0.75, 0.55, 0.2, al) if int(pp.x) % 3 != 0 else Color(0.55, 0.65, 0.25, al)
+				wfx.draw_rect(Rect2(pp, Vector2(2, 1)), lc)
+			"mote":
+				var tw: float = 0.5 + 0.5 * sin(anim_t * 4.0 + pp.x)
+				wfx.draw_rect(Rect2(pp, Vector2(1, 1)), Color(q["c"].r, q["c"].g, q["c"].b, al * tw))
+			"firefly":
+				var tw2: float = 0.5 + 0.5 * sin(anim_t * 6.0 + float(q["ph"]))
+				wfx.draw_rect(Rect2(pp, Vector2(1, 1)), Color(0.95, 0.85, 0.5, al * tw2 * night_k))
+			"ember":
+				wfx.draw_rect(Rect2(pp, Vector2(1, 1)), Color(1.0, 0.7, 0.3, al))
+			"dust":
+				wfx.draw_rect(Rect2(pp, Vector2(2, 2)), Color(0.75, 0.66, 0.52, 0.5 * al))
+			"rain":
+				wfx.draw_line(pp, pp + Vector2(-2, 6), Color(0.7, 0.75, 0.85, 0.45), 1.0)
+				if pp.y > GROUND_Y - 4.0:
+					wfx.draw_rect(Rect2(pp + Vector2(-1, 0), Vector2(3, 1)), Color(0.8, 0.85, 0.9, 0.5))
+	# streams off the ledge: a column of falling water with moving highlights, and a splash ring
+	for fx3 in falls:
+		var wx: float = fx3
+		if wx < cam_x - 10.0 or wx > cam_x + 490.0:
+			continue
+		for yy in range(int(GROUND_Y + 8.0), int(WATER_Y)):
+			var ph := fmod(anim_t * 40.0 - yy, 8.0)
+			var c := Color(0.85, 0.92, 0.95, 0.85) if ph < 2.0 else Color(0.55, 0.7, 0.78, 0.7)
+			wfx.draw_rect(Rect2(wx, yy, 2, 1), c)
+		var sp := int(anim_t * 6.0) % 3
+		wfx.draw_rect(Rect2(wx - 2 - sp, WATER_Y - 1, 6 + sp * 2, 1), Color(0.9, 0.95, 1.0, 0.6))
+	# birds drifting high over the road (in world space, but slow, so they read as far away)
+	for b in birds:
+		var bp := Vector2(cam_x + float(b[0]) - 100.0, float(b[1]) + sin(anim_t * 0.8 + float(b[3])) * 5.0).round()
+		var flap := int(anim_t * 6.0 + float(b[3])) % 2
+		var bc := Color(0.1, 0.08, 0.12, 0.85)
+		wfx.draw_rect(Rect2(bp, Vector2(1, 1)), bc)
+		wfx.draw_rect(Rect2(bp + Vector2(-2, -1 + flap), Vector2(2, 1)), bc)
+		wfx.draw_rect(Rect2(bp + Vector2(1, -1 + flap), Vector2(2, 1)), bc)
+
+
+func _draw_rays() -> void:
+	## low sun through the trees at dawn and late afternoon: soft slanted shafts behind the near wood
+	if ray_k <= 0.01:
+		return
+	var off := fmod(cam_x * 0.5, 160.0)
+	for i in 6:
+		var x0 := 40.0 + i * 160.0 * 0.5 + 23.0 * sin(i * 2.3) - off
+		var w := 10.0 + 8.0 * absf(sin(i * 1.7))
+		var a := ray_k * (0.05 + 0.03 * sin(anim_t * 0.6 + i))
+		var pts := PackedVector2Array([Vector2(x0, 40), Vector2(x0 + w, 40), Vector2(x0 + w + 70, GROUND_Y), Vector2(x0 + 70, GROUND_Y)])
+		rays.draw_colored_polygon(pts, Color(1.0, 0.9, 0.65, a))
+
+
+func _draw_fg() -> void:
+	## dark grass and bushes passing in front of the column, faster than the road, for depth
+	var pal: Dictionary = PAL[region]
+	var c: Color = pal["leaf"].darkened(0.55)
+	var cx := roundf(cam_x * 1.35)
+	for b in fg_bits:
+		var x: float = float(b[0]) - cx
+		if x < -40.0 or x > 520.0:
+			continue
+		var h: float = b[1]
+		var sway := sin(anim_t * 1.5 + float(b[3])) * 1.5
+		match int(b[2]):
+			0:      # tuft of tall grass
+				for k in 7:
+					var gx := x + k * 2.0
+					var gh := h * (0.6 + 0.4 * sin(k * 1.9 + float(b[3])))
+					fg.draw_line(Vector2(gx, WATER_Y + 1), Vector2(gx + sway * (gh / h), WATER_Y + 1 - gh), c, 1.0)
+			1:      # round bush
+				fg.draw_circle(Vector2(x + 6, WATER_Y - h * 0.4), h * 0.6, c)
+				fg.draw_circle(Vector2(x + 14, WATER_Y - h * 0.3), h * 0.45, c)
+			_:      # reeds
+				for k in 4:
+					var rx := x + k * 3.0
+					fg.draw_line(Vector2(rx, WATER_Y + 1), Vector2(rx + sway, WATER_Y - h - k), c, 1.0)
+					fg.draw_rect(Rect2(Vector2(rx + sway - 1, WATER_Y - h - k - 3).round(), Vector2(2, 4)), c)
 
 
 func _mix3(keys: Array, p: float) -> Color:
@@ -720,29 +807,46 @@ func _mix3(keys: Array, p: float) -> Color:
 func _apply_time() -> void:
 	## Distance along the leg IS the time of day: dawn at the camp, night at the crossroads.
 	var p: float = clamp(pos.x / length, 0.0, 1.0)
-	var rt: Color = Game.REGIONS[region]["tint"]
-	var sky := _mix3([[0.0, Color(0.6, 0.5, 0.6)], [0.3, Color(0.62, 0.72, 0.86)], [0.62, Color(0.6, 0.36, 0.4)], [0.86, Color(0.26, 0.3, 0.54)], [1.0, Color(0.26, 0.3, 0.54)]], p)
-	var tint := _mix3([[0.0, Color(1.0, 0.88, 0.82)], [0.3, Color(1, 1, 1)], [0.62, Color(1.0, 0.76, 0.64)], [0.86, Color(0.62, 0.66, 0.88)], [1.0, Color(0.62, 0.66, 0.88)]], p)
-	var night: float = clamp((p - 0.62) / 0.24, 0.0, 1.0)
-	sky = sky * rt
-	tint = tint * rt
-	sun.light_color = tint
-	sun.light_energy = lerp(1.15, 0.5, night)
-	sun.rotation_degrees = Vector3(-58.0 + 26.0 * abs(p - 0.35), lerp(55.0, -65.0, p), 0)   # long shadows at dawn and dusk
-	env.ambient_light_color = sky
-	env.ambient_light_energy = lerp(0.6, 0.75, night)
-	torch.light_energy = 1.8 * night
-	torch.position = pos + Vector3(0.2, 1.3, 0.5)
-	env.background_color = sky * 0.2
-	for s in tint_sprites:
-		var base: Color = s.get_meta("base")
-		s.modulate = base * tint
+	var rt := Color.WHITE        # the painted strips already carry each region's colour
+	var dt: Color = SKY[region][0]
+	var db: Color = SKY[region][1]
+	var top := _mix3([[0.0, dt.lerp(Color(0.42, 0.36, 0.5), 0.55)], [0.25, dt], [0.5, dt], [0.66, dt.lerp(Color(0.36, 0.26, 0.42), 0.6)], [0.86, Color(0.07, 0.08, 0.15)], [1.0, Color(0.05, 0.06, 0.12)]], p)
+	var bot := _mix3([[0.0, db.lerp(Color(0.98, 0.76, 0.6), 0.55)], [0.25, db], [0.5, db], [0.66, db.lerp(Color(0.98, 0.62, 0.4), 0.6)], [0.86, Color(0.22, 0.22, 0.32)], [1.0, Color(0.16, 0.17, 0.26)]], p)
+	var tint := _mix3([[0.0, Color(1.0, 0.88, 0.84)], [0.25, Color(1, 1, 1)], [0.5, Color(1, 1, 1)], [0.66, Color(1.0, 0.8, 0.66)], [0.86, Color(0.42, 0.46, 0.7)], [1.0, Color(0.36, 0.4, 0.64)]], p)
+	night_k = clamp((p - 0.62) / 0.24, 0.0, 1.0)
+	sky_mat.set_shader_parameter("top_col", Vector3(top.r, top.g, top.b) * Vector3(rt.r, rt.g, rt.b))
+	sky_mat.set_shader_parameter("bot_col", Vector3(bot.r, bot.g, bot.b) * Vector3(rt.r, rt.g, rt.b))
+	sky_mat.set_shader_parameter("night", night_k)
+	# the sun climbs and sinks across the leg; the moon rises after dusk
+	var orb := Vector2(0.15 + p * 0.8, 0.75 - sin(clamp(p / 0.8, 0.0, 1.0) * PI) * 0.55) if night_k < 0.5 else Vector2(0.25 + p * 0.3, 0.25)
+	sky_mat.set_shader_parameter("orb_pos", orb)
+	sky_mat.set_shader_parameter("orb_col", Vector3(1.0, 0.92, 0.7) if night_k < 0.5 else Vector3(0.9, 0.92, 1.0))
+	if rain:
+		tint = tint * Color(0.78, 0.8, 0.86)
+		top = top.lerp(Color(0.36, 0.38, 0.44), 0.6)
+		bot = bot.lerp(Color(0.6, 0.62, 0.66), 0.6)
+		sky_mat.set_shader_parameter("top_col", Vector3(top.r, top.g, top.b) * Vector3(rt.r, rt.g, rt.b))
+		sky_mat.set_shader_parameter("bot_col", Vector3(bot.r, bot.g, bot.b) * Vector3(rt.r, rt.g, rt.b))
+	tint = tint.lerp(Color(0.26, 0.28, 0.44), night_k * 0.55)      # Kingdom nights: only the fires carry colour
+	tint_mod.color = tint * rt
+	# aerial perspective: far strips fade into the horizon colour (divided by the tint the world will get)
+	var hz := bot * rt
+	var tw := tint * rt
+	var fogc := Vector3(hz.r / max(tw.r, 0.25), hz.g / max(tw.g, 0.25), hz.b / max(tw.b, 0.25)).clamp(Vector3.ZERO, Vector3(1.4, 1.4, 1.4))
+	for l in layers:
+		if l[2] != null:
+			var m: ShaderMaterial = l[2]
+			m.set_shader_parameter("fog_col", fogc)
+			m.set_shader_parameter("amount", float(l[3]) * (1.0 - night_k * 0.5) * (1.25 if rain else 1.0))
+	ray_k = (0.0 if rain else 1.0) * (clamp(1.0 - absf(p - 0.12) / 0.14, 0.0, 1.0) * 0.9 + clamp(1.0 - absf(p - 0.58) / 0.1, 0.0, 1.0) * 0.7)
+	torch.energy = 0.9 * night_k
 	for l in fire_lights:
-		l.light_energy = 0.12 + 2.2 * night
-	water_mat.set_shader_parameter("tint", Vector3(tint.r, tint.g, tint.b))
-	var fc := Color(0.86, 0.86, 0.94).lerp(Color(0.5, 0.56, 0.8), night) * rt
+		var base: float = l.get_meta("base")
+		l.energy = base * (0.2 + 1.1 * night_k) * (0.9 + 0.1 * sin(anim_t * 11.0 + l.position.x))
+	water_mat.set_shader_parameter("tint", (WATER[region] as Vector3).lerp(Vector3(0.03, 0.05, 0.12), night_k))
+	var fc := Color(0.86, 0.86, 0.94).lerp(Color(0.4, 0.46, 0.7), night_k) * rt
 	fog_mat.set_shader_parameter("fog_col", Vector3(fc.r, fc.g, fc.b))
-	fog_mat.set_shader_parameter("density", 0.28 + 0.25 * night + (0.2 if p < 0.12 else 0.0))
+	fog_mat.set_shader_parameter("density", 0.12 + 0.2 * night_k + (0.2 if p < 0.12 else 0.0))
 
 
 func _prompt_text(p: Dictionary) -> String:
@@ -764,10 +868,9 @@ func _prompt_text(p: Dictionary) -> String:
 
 func _update_prompt() -> void:
 	near = null
-	var best := 3.2
+	var best := 46.0
 	for n in poi_nodes:
-		var at: Vector3 = n["at"]
-		var d: float = Vector2(at.x - pos.x, at.z - pos.z).length()
+		var d: float = absf(float(n["x"]) - pos.x)
 		if d < best and _prompt_text(n["poi"]) != "":
 			best = d
 			near = n
@@ -776,9 +879,8 @@ func _update_prompt() -> void:
 		return
 	prompt.visible = true
 	prompt.text = _prompt_text(near["poi"])
-	var at2: Vector3 = near["at"]
-	var sp: Vector2 = cam.unproject_position(Vector3(at2.x, 2.9, min(at2.z, -3.0)))
-	prompt.position = Vector2(round(sp.x) - 100.0, clamp(round(sp.y), 24.0, 236.0) + round(sin(anim_t * 3.0) * 2.0))
+	var sx := roundf(float(near["x"]) - cam_x)
+	prompt.position = Vector2(sx - 100.0, clamp(float(near["top"]) - 14.0, 24.0, 236.0) + roundf(sin(anim_t * 3.0) * 2.0))
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -811,21 +913,21 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _debug_next_stop() -> void:
 	## dev shortcut (debug builds only): "]" jumps the column to the next stop on the road
-	var best := length - 1.5
+	var best := length - 30.0
 	for n in poi_nodes:
 		var nx: float = n["x"]
-		if nx > pos.x + 0.6 and nx < best:
+		if nx > pos.x + 12.0 and nx < best:
 			best = nx
 	if not st["won"]:
 		for n in poi_nodes:
 			if n["poi"]["type"] == "warning":
 				best = min(best, float(n["x"]))
-	pos = Vector3(best, 0, 0)
+	pos.x = best
 	var back := 0.0
 	for f in followers:
 		back += float(f["gap"])
-		f["spr"].position = Vector3(pos.x - back, 0, 0)
-	cam_focus = Vector3(clamp(pos.x, 6.0, length - 4.0), 0, 0)
+		f["x"] = pos.x - back
+	cam_x = clamp(pos.x - 240.0, 0.0, max(0.0, length - 480.0))
 
 
 func _interact(p: Dictionary) -> void:
@@ -851,6 +953,7 @@ func _interact(p: Dictionary) -> void:
 # ------------------------------------------------------------------ window kit
 func close_menu() -> void:
 	if menu_root != null:
+		Game.sfx("ui_close", -6.0)
 		menu_root.queue_free()
 		menu_root = null
 	busy = false
@@ -885,13 +988,75 @@ func window(title: String, width := 300, closable := true) -> VBoxContainer:
 	panel.add_child(vb)
 	var head := HBoxContainer.new()
 	vb.add_child(head)
-	var tl := Game.label(title, GOLDC)
-	tl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	head.add_child(tl)
+	var plate := PanelContainer.new()
+	plate.theme_type_variation = "TitlePlate"
+	plate.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	plate.add_child(Game.label(title, Color(1.0, 0.9, 0.62)))
+	head.add_child(plate)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(spacer)
 	if closable:
 		head.add_child(Game.button("x", close_menu))
+	# a small animated painting heads the window
+	var art := art_hint
+	art_hint = ""
+	if art == "":
+		art = _art_for(title)
+	var vig = null
+	if art != "":
+		vig = VIGNETTE.new()
+		vig.setup(art)
+		vb.add_child(vig)
 	vb.add_child(HSeparator.new())
+	if fresh:
+		Game.sfx("ui_open", -5.0)
+		panel.pivot_offset = Vector2(width * 0.5, 60)
+		panel.scale = Vector2(0.94, 0.94)
+		create_tween().tween_property(panel, "scale", Vector2.ONE, 0.18).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_settle_window.call_deferred(panel, vig, fresh)
 	return vb
+
+
+func _art_for(title: String) -> String:
+	var table := {"Camp": "camp", "Muster": "muster", "The baggage train": "pack", "The ledger": "ledger",
+		"The four realms": "map", "A roadside stall": "stall", "A river altar": "altar", "The road is held": "brief",
+		"The road divides": "cross", "The omen": "omen", "The toll": "brief"}
+	for k in table:
+		if title == Game.L(k):
+			return table[k]
+	return ""
+
+
+func _settle_window(panel: Control, vig, fresh: bool) -> void:
+	## after layout: shrink the painting if the window would run off screen, then run the gold sparks round the frame
+	if not is_instance_valid(panel):
+		return
+	await get_tree().process_frame
+	if not is_instance_valid(panel):
+		return
+	var over := panel.get_combined_minimum_size().y - 262.0
+	if is_instance_valid(vig) and over > 0.0:
+		var hgt: float = max(0.0, vig.custom_minimum_size.y - over)
+		if hgt < 22.0:
+			vig.queue_free()
+		else:
+			vig.custom_minimum_size.y = hgt
+		await get_tree().process_frame
+	if fresh and is_instance_valid(panel):
+		var fx = UI_FX.new()
+		fx.mode = "border"
+		fx.rect = Rect2(panel.global_position + Vector2(2, 2), panel.size - Vector2(4, 4))
+		menu_layer.add_child(fx)
+
+
+func stamp(at: Vector2) -> void:
+	## a wax seal pressed where a decision was made
+	var fx = UI_FX.new()
+	fx.mode = "seal"
+	fx.at = at
+	fx_layer.add_child(fx)
+	Game.sfx("ui_choice", -3.0)
 
 
 func _scroll(vb: VBoxContainer, height: int) -> VBoxContainer:
@@ -964,19 +1129,32 @@ func open_ledger() -> void:
 		vb.add_child(Game.label("%s  (%s)" % [str(p["text"]), Game.L(str(p["state"]))], c, 318))
 
 
-func open_map() -> void:
-	var vb := window(Game.L("The four realms"), 260)
-	var tr := TextureRect.new()
-	tr.texture = _tex("ui/map")
-	tr.custom_minimum_size = Vector2(240, 150)
-	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	tr.stretch_mode = TextureRect.STRETCH_SCALE
-	vb.add_child(tr)
-	var names: Array = []
-	for r in Game.route_log:
-		names.append(Game.L(str(Game.REGIONS[r]["name"])))
-	vb.add_child(Game.label(Game.L("Road so far: ") + " > ".join(PackedStringArray(names)), null, 240))
-	vb.add_child(Game.label(Game.L("N Frostbay: oaths.  W Thorncrown: growth.  E Duskviolet: memory.  S Empire: wealth and lives."), DIM, 240))
+func open_map(choose := false) -> void:
+	## the living map of the four realms; at a crossroads it is where the next road is chosen
+	busy = true
+	var layer := CanvasLayer.new()
+	layer.layer = 30
+	add_child(layer)
+	var m = WORLD_MAP.new()
+	m.setup(choose, st["options"] if choose else [])
+	layer.add_child(m)
+	m.closed.connect(_on_map_closed.bind(layer, choose))
+	m.chosen.connect(_on_map_chosen.bind(layer))
+
+
+func _on_map_closed(layer: CanvasLayer, choose: bool) -> void:
+	layer.queue_free()
+	busy = false
+	if choose:
+		open_crossroads()
+
+
+func _on_map_chosen(o: String, layer: CanvasLayer) -> void:
+	layer.queue_free()
+	if o == "altar":
+		_to_altar()
+	else:
+		_march(o)
 
 
 # ------------------------------------------------------------------ shop
@@ -998,7 +1176,8 @@ func open_shop(p: Dictionary) -> void:
 	var buy_grain := func():
 		Game.denarii -= 12
 		Game.grain += 10
-		Game.sfx("coin")
+		Game.sfx("coin_pay", -6.0)
+		Game.sfx("grain", -4.0)
 		Game.changed.emit()
 		open_shop(p)
 	var bg := Game.button(Game.L("10 grain  -  12 d"), buy_grain, Game.denarii >= 12)
@@ -1030,7 +1209,7 @@ func open_shop(p: Dictionary) -> void:
 		var sell := func():
 			Game.remove_item(id)
 			Game.denarii += val
-			Game.sfx("coin")
+			Game.sfx("sell", -3.0)
 			if id == "white_ox":
 				Game.write(Game.L("Sold the white ox for %d denarii.") % val)
 			elif id == "relic_horn":
@@ -1308,6 +1487,7 @@ func open_battle_brief() -> void:
 
 # ------------------------------------------------------------------ events
 func _finish_event(p: Dictionary, title: String, text: String) -> void:
+	art_hint = _event_art(p)
 	p["used"] = true
 	Game.flags["event_" + str(p["event"])] = true
 	Game.changed.emit()
@@ -1321,12 +1501,18 @@ func _skip_event(p: Dictionary, title: String) -> void:
 	close_menu()
 
 
+func _event_art(p: Dictionary) -> String:
+	return {"south": "village", "west": "seed", "north": "oath", "east": "envoy", "deserters": "deserters"}.get(str(p.get("event", "")), "refugees")
+
+
 func _show_event(p: Dictionary, title: String, text: String, choices: Array) -> void:
+	art_hint = _event_art(p)
 	var vb := window(title, 372, false)
 	vb.add_child(Game.label(text, null, 358))
 	vb.add_child(HSeparator.new())
 	for c in choices:
 		var b := Game.button(str(c[0]), c[2], c[1])
+		b.pressed.connect(func(): stamp(b.get_global_rect().get_center() if is_instance_valid(b) else Vector2(240, 135)))
 		b.set("autowrap_mode", TextServer.AUTOWRAP_WORD_SMART)   # Godot 4.3+; ignored on older 4.x
 		b.custom_minimum_size = Vector2(358, 0)
 		vb.add_child(b)
@@ -1548,6 +1734,7 @@ func open_crossroads() -> void:
 		warn = Game.L("You have only %d - men will die on the march.") % Game.grain
 	vb.add_child(Game.label(Game.L("Night. A day's march either way; the column will eat %d grain. %s") % [need, warn], DIM, 386))
 	var opts: Array = st["options"]
+	vb.add_child(Game.button(Game.L("Choose on the map"), _cross_map))
 	if opts[0] == "altar":
 		vb.add_child(Game.label(Game.L("There is only one road left. Torches on the hill ahead: the Great Altar, and the Emperor's auditors."), null, 386))
 		vb.add_child(Game.button(Game.L("Go up to the Great Altar"), _to_altar))
@@ -1570,3 +1757,8 @@ func open_crossroads() -> void:
 			est += int(g[1])
 		card.add_child(Game.label(Game.L("Scouts: about %d hold that road, not counting what hides. Recruits there: %d.") % [est, 22 if o == "south" else 12], DIM, 186))
 		card.add_child(Game.button(Game.L("March  (%s)") % Game.L(str(rg["road"])), _march.bind(str(o))))
+
+
+func _cross_map() -> void:
+	close_menu()
+	open_map(true)

@@ -437,6 +437,8 @@ func tribute_count() -> int:
 
 func write(text: String) -> void:
 	ledger.append({"day": day, "text": text})
+	if ledger.size() > 2:
+		sfx("quill", -8.0, randf_range(0.9, 1.1))
 	changed.emit()
 	ledger_written.emit(text)
 
@@ -621,7 +623,64 @@ func _build_theme() -> void:
 	theme.set_constant("separation", "VBoxContainer", 3)
 	theme.set_constant("separation", "HBoxContainer", 4)
 	theme.set_constant("line_spacing", "Label", 1)
+	_roman_skin()
 	_apply_font()
+
+
+func load_tex(path: String) -> Texture2D:
+	## imported texture if the editor has seen it, else read the png straight from disk
+	if ResourceLoader.exists(path):
+		return load(path)
+	if FileAccess.file_exists(path):
+		var img := Image.load_from_file(ProjectSettings.globalize_path(path))
+		if img != null:
+			return ImageTexture.create_from_image(img)
+	return null
+
+
+func _tsb(path: String, m: int, content: Vector4, tile := true) -> StyleBoxTexture:
+	var tx := load_tex(path)
+	if tx == null:
+		return null
+	var sb := StyleBoxTexture.new()
+	sb.texture = tx
+	sb.texture_margin_left = m
+	sb.texture_margin_right = m
+	sb.texture_margin_top = m
+	sb.texture_margin_bottom = m
+	sb.content_margin_left = content.x
+	sb.content_margin_top = content.y
+	sb.content_margin_right = content.z
+	sb.content_margin_bottom = content.w
+	if tile:
+		sb.axis_stretch_horizontal = StyleBoxTexture.AXIS_STRETCH_MODE_TILE
+		sb.axis_stretch_vertical = StyleBoxTexture.AXIS_STRETCH_MODE_TILE
+	return sb
+
+
+func _roman_skin() -> void:
+	## gold meander frames, bronze plaques for buttons, a scroll-tipped rule for separators
+	var panel := _tsb("res://assets/ui/roman_panel.png", 12, Vector4(13, 12, 13, 12))
+	if panel != null:
+		theme.set_stylebox("panel", "PanelContainer", panel)
+	for st in ["normal", "hover", "pressed", "disabled"]:
+		var b := _tsb("res://assets/ui/roman_btn_%s.png" % st, 4, Vector4(7, 3, 7, 3), false)
+		if b != null:
+			theme.set_stylebox(st, "Button", b)
+	var sep_tx := load_tex("res://assets/ui/roman_sep.png")
+	if sep_tx != null:
+		var sep := StyleBoxTexture.new()
+		sep.texture = sep_tx
+		sep.texture_margin_left = 8
+		sep.texture_margin_right = 8
+		sep.content_margin_top = 2
+		sep.content_margin_bottom = 2
+		theme.set_stylebox("separator", "HSeparator", sep)
+		theme.set_constant("separation", "HSeparator", 7)
+	var tp := _tsb("res://assets/ui/roman_title.png", 5, Vector4(9, 1, 9, 1), false)
+	if tp != null:
+		theme.set_type_variation("TitlePlate", "PanelContainer")
+		theme.set_stylebox("panel", "TitlePlate", tp)
 
 
 func _sb(bg: Color, border: Color, margin: int) -> StyleBoxFlat:
@@ -652,10 +711,16 @@ func button(text: String, cb: Callable, enabled := true) -> Button:
 	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	b.focus_mode = Control.FOCUS_NONE
 	var on_press := func():
-		sfx("click", -6.0)
+		sfx("ui_press", -4.0, randf_range(0.95, 1.05))
 		cb.call()
 	b.pressed.connect(on_press)
+	b.mouse_entered.connect(_btn_hover.bind(b))
 	return b
+
+
+func _btn_hover(b: Button) -> void:
+	if is_instance_valid(b) and not b.disabled:
+		sfx("ui_hover", -14.0, randf_range(0.95, 1.1))
 
 
 func enable_keys(root) -> void:
